@@ -1602,15 +1602,62 @@ function addSystemChatMessage(text, type = 'system') {
 
 // Markdown formatting simplified regex
 function formatMarkdown(text) {
-  return text
+  if (!text) return '';
+  
+  // 1. Escaping HTML first
+  let html = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/```(?:javascript|json|html|css|python)?\n([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br>');
+    .replace(/>/g, '&gt;');
+    
+  // 2. Code blocks
+  html = html.replace(/```(?:javascript|json|html|css|python)?\n([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+  
+  // 3. Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  
+  // 4. Headers
+  html = html.replace(/^# (.*$)/gim, '<h3>$1</h3>');
+  html = html.replace(/^## (.*$)/gim, '<h4>$1</h4>');
+  html = html.replace(/^### (.*$)/gim, '<h5>$1</h5>');
+  
+  // 5. Bold & Italic
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  
+  // 6. Bullet lists
+  html = html.replace(/^\s*[\*\-]\s+(.*$)/gim, '<li>$1</li>');
+  
+  // Wrap list items in <ul>
+  const lines = html.split('\n');
+  let inList = false;
+  const processedLines = lines.map(line => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('<li>')) {
+      if (!inList) {
+        inList = true;
+        return '<ul>' + line;
+      }
+      return line;
+    } else {
+      if (inList) {
+        inList = false;
+        return '</ul>' + line;
+      }
+    }
+    
+    // Normal paragraph spacing: wrap non-header/non-list elements
+    if (trimmed && !trimmed.startsWith('<h') && !trimmed.startsWith('<pre') && !trimmed.startsWith('</pre') && !trimmed.startsWith('<code>') && !trimmed.startsWith('</code') && !trimmed.startsWith('<ul>') && !trimmed.startsWith('</ul>')) {
+      return `<p>${line}</p>`;
+    }
+    return line;
+  });
+  
+  if (inList) {
+    processedLines.push('</ul>');
+  }
+  
+  return processedLines.join('\n');
 }
 
 function escapeHtml(text) {
