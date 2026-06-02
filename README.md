@@ -21,8 +21,10 @@ graph TD
     I --> J[User Types Command in toolbar Input]
     J --> K[AI Completion Provider: Gemini, Ollama, Demo]
     
-    L[User actions: append Note / Keypoints] --> M[Save to browser LocalStorage]
+    L[User Actions: Highlights / Notes / Progress] --> M[Save to browser LocalStorage]
     M -->|Web File System Sync| N[Direct write to connected note file]
+    M -->|Firebase Auth Client| O[Debounced Cloud Firestore Sync]
+    O -->|Restores on Startup| P[Restore Highlights / Notes / Flashcards / Reading Position]
 ```
 
 ### A. Left Column: PDF Renderer & Image Detection
@@ -53,6 +55,13 @@ graph TD
   - **DOCX**: Formats note markdown into an HTML body template and downloads it as a `.doc` file under `application/msword`. Microsoft Word and Google Docs read this HTML formatting natively.
   - **PDF**: Compiles notes into print-ready styling, opens a pop-up window, triggers `window.print()` for PDF exporting, and self-closes.
 
+### E. Cloud Synchronization & Session Recovery (Firebase Sync)
+- **Automatic Anonymous Guest Authentication**: When the application starts, it performs a frictionless behind-the-scenes anonymous authentication via Firebase Auth to establish a secure workspace instance.
+- **Google Sign-In Account Upgrade**: Users can click the account button in the header to upgrade their guest session to a persistent Google account, syncing study assets and progress to their personal profile.
+- **Cloud State Backups**: User states (highlights, notes editor text, flashcards deck, active page scroll position, and PDF zoom levels) are automatically backed up to Cloud Firestore under `/users/{uid}/data/session`.
+- **Debounced Save Loop**: Notes, scroll coordinates, and configurations trigger a debounced saving routine (`1000ms` window) to minimize write bandwidth and keep the client snappy.
+- **Auto-Restoration on Startup**: Re-authenticating a user profile pulls their document from Firestore and automatically redraws overlay elements, populates the editor, and scrolls the reader panel back to where they stopped.
+
 ---
 
 ## 2. Technical Tools & Web APIs Used
@@ -61,6 +70,7 @@ graph TD
 | :--- | :--- |
 | **Vite v5.4.11** | High-performance bundler and local development server, providing live reload and API proxy routing. |
 | **PDF.js v3.11.174** | Firefox's open-source library used to load documents, render page canvases, extract textLayers, and scan image operator matrices. |
+| **Firebase Client SDK v10.x** | Integrates Firebase Auth (Anonymous & Google Login) and Cloud Firestore for session storage and synchronization. |
 | **HTML5 & CSS3** | Structural elements and premium dark-mode glassmorphic theme styling. |
 | **Canvas API** | Used to draw high-resolution page bitmaps and crop selected image coordinate bounds for export. |
 | **Web File System Access API** | Modern browser file picker handles (`showOpenFilePicker`), allowing live notes synchronization directly to files on disk. |
@@ -97,7 +107,15 @@ Follow this checklist to get the application set up and make use of all its feat
 4. Choose the empty file you created. Your browser will prompt you to grant edit permissions—click **Save Changes / Allow**.
 5. Note the status dot turns green (`SYNC ACTIVE`), showing it's ready.
 
-### Step 4: Highlight and Run Commands
+### Step 4: Configure Firebase Cloud Synchronization & Session Recovery
+1. When you first launch the app, you will be automatically signed in under a **Guest Session** (Anonymous Auth).
+2. Look at the top right header widget showing `👤 Guest Session`. This indicates that your highlights, notes, and session state are backed up locally.
+3. Click the `👤 Guest Session` button in the header.
+4. In the cloud sync modal, click **Sign In with Google**. A popup window will prompt you to authenticate.
+5. Once signed in, the header status will update to display your Google avatar and name, and the badge will show `Cloud Sync Active`.
+6. Now, any updates you make will synchronize to Cloud Firestore, enabling you to close the browser and resume exactly where you left off (including notes text, highlights, flashcard decks, current reading page, and zoom level).
+
+### Step 5: Highlight and Run Commands
 1. Upload a PDF or click **Load Sample Document** on the welcome page.
 2. Drag your cursor to select a sentence.
 3. Notice the floating actions box appears above your selection:
@@ -105,10 +123,10 @@ Follow this checklist to get the application set up and make use of all its feat
    - Click the **Note** button to append the selected text directly to your local file.
    - Click the **Summarize** button to get a paragraph summary inside the Siri-glow pop-up.
    - Click inside the text box and type `/keypoints` to get bullet-point takeaways.
-   - Type `/flashcard` to generate cards, then view and practice them under the **Flashcards** tab.
+   - Type `/flashcard` to generate study cards, then view and practice them under the **Flashcards** tab.
 4. Drag your selection over a diagram/image in the PDF. Verify that a toast message pops up confirming the crop was automatically copied to your clipboard.
 
-### Step 5: Exporting Notes
+### Step 6: Exporting Notes
 1. Open the **Study Notes** tab.
 2. Review your compiled notes in the editing workspace.
 3. Click **TXT** to download a copy of your plain markdown notes.
