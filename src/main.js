@@ -37,6 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initNotesEditor();
   initFlashcards();
   initImageSelectionTracker();
+  initSidebarToggle();
   
   // Try loading API status
   updateApiStatusDisplay();
@@ -736,7 +737,7 @@ function initFloatingToolbar() {
   }, 150));
   
   function positionToolbar(selectionRect) {
-    const toolbarWidth = 320; // Expanded slightly to fit Copy Image button nicely
+    const toolbarWidth = 280; // Compact width for the dropdown toolbar
     const toolbarHeight = 82;
     
     let left = selectionRect.left + (selectionRect.width / 2) - (toolbarWidth / 2);
@@ -757,11 +758,28 @@ function initFloatingToolbar() {
   
   // Intercept mousedown on tooltip so click doesn't deselect text
   toolbar.addEventListener('mousedown', (e) => {
-    // DO NOT prevent default if clicking the input text box or inside the result panel text
-    if (e.target.id === 'toolbar-cmd-input' || e.target.tagName === 'INPUT' || e.target.closest('#toolbar-result-section')) {
+    // DO NOT prevent default if clicking the input text box, inside the dropdown, or inside the result panel text
+    if (e.target.id === 'toolbar-cmd-input' || e.target.tagName === 'INPUT' || e.target.closest('#toolbar-actions-dropdown') || e.target.closest('#toolbar-result-section')) {
       return; 
     }
     e.preventDefault();
+  });
+  
+  // Dropdown open/close toggle
+  const dropdownTrigger = document.getElementById('btn-dropdown-trigger');
+  const dropdownMenu = document.getElementById('dropdown-menu-list');
+  
+  dropdownTrigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isShowing = dropdownMenu.style.display === 'flex';
+    dropdownMenu.style.display = isShowing ? 'none' : 'flex';
+  });
+  
+  // Close dropdown on click outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#toolbar-actions-dropdown')) {
+      dropdownMenu.style.display = 'none';
+    }
   });
   
   // Action Handlers: Highlights
@@ -769,25 +787,51 @@ function initFloatingToolbar() {
     btn.addEventListener('click', () => {
       const color = btn.getAttribute('data-color');
       applyHighlight(color);
+      clearTemporaryHighlight();
       toolbar.style.display = 'none';
       collapseToolbarResult();
+      dropdownMenu.style.display = 'none';
     });
   });
   
-  // Action Handlers: Direct note append
-  document.getElementById('btn-toolbar-append').addEventListener('click', () => {
+  // Dropdown Action Handlers: Add to Notes
+  document.getElementById('dropdown-action-note').addEventListener('click', () => {
     appendToLocalFile(selectedText, selectedTextPageNum);
+    clearTemporaryHighlight();
     window.getSelection().removeAllRanges();
     toolbar.style.display = 'none';
     collapseToolbarResult();
+    dropdownMenu.style.display = 'none';
   });
   
-  // Action Handlers: Copy Selection as Image (Retina Crop & Clipboard Copy)
-  document.getElementById('btn-toolbar-copy-image').addEventListener('click', copySelectedAreaAsImage);
+  // Dropdown Action Handlers: Copy Selection as Image
+  document.getElementById('dropdown-action-image').addEventListener('click', () => {
+    copySelectedAreaAsImage();
+    dropdownMenu.style.display = 'none';
+  });
   
-  // Action Handlers: AI Quick Summarize
-  document.getElementById('btn-toolbar-summarize').addEventListener('click', () => {
+  // Dropdown Action Handlers: AI Quick Summarize
+  document.getElementById('dropdown-action-summarize').addEventListener('click', () => {
     runInlineAICommand(`/summarize`, selectedText);
+    dropdownMenu.style.display = 'none';
+  });
+  
+  // Dropdown Action Handlers: AI Key Takeaways
+  document.getElementById('dropdown-action-keypoints').addEventListener('click', () => {
+    runInlineAICommand(`/keypoints`, selectedText);
+    dropdownMenu.style.display = 'none';
+  });
+  
+  // Dropdown Action Handlers: AI Explain Concept
+  document.getElementById('dropdown-action-explain').addEventListener('click', () => {
+    runInlineAICommand(`/explain`, selectedText);
+    dropdownMenu.style.display = 'none';
+  });
+  
+  // Dropdown Action Handlers: AI Make Flashcards
+  document.getElementById('dropdown-action-flashcard').addEventListener('click', () => {
+    runInlineAICommand(`/flashcard`, selectedText);
+    dropdownMenu.style.display = 'none';
   });
   
   // Action Handlers: Command input triggers
@@ -812,6 +856,7 @@ function initFloatingToolbar() {
   // Siri Result Panel Actions
   document.getElementById('btn-result-close').addEventListener('click', () => {
     collapseToolbarResult();
+    clearTemporaryHighlight();
     window.getSelection().removeAllRanges();
     toolbar.style.display = 'none';
   });
@@ -888,6 +933,7 @@ async function copySelectedAreaAsImage() {
   }
   
   // Hide toolbar
+  clearTemporaryHighlight();
   window.getSelection().removeAllRanges();
   toolbar.style.display = 'none';
   collapseToolbarResult();
@@ -2219,4 +2265,23 @@ function convertMarkdownToHtml(markdown) {
     }
     return line.trim() ? `<p>${line}</p>` : '';
   }).join('\n');
+}
+
+function initSidebarToggle() {
+  const toggleBtn = document.getElementById('btn-toggle-sidebar');
+  const workspace = document.getElementById('workspace-panel');
+  const divider = document.getElementById('split-divider');
+  
+  if (toggleBtn && workspace && divider) {
+    toggleBtn.addEventListener('click', () => {
+      const isCollapsed = workspace.classList.toggle('collapsed');
+      divider.classList.toggle('collapsed');
+      toggleBtn.classList.toggle('active');
+      
+      // Trigger PDF rerender/resize when width changes
+      setTimeout(() => {
+        triggerPDFResize();
+      }, 100);
+    });
+  }
 }

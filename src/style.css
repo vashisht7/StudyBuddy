@@ -1328,3 +1328,78 @@ input, button, textarea {
   50% { opacity: 1.0; }
 }
 
+/* Sidebar Collapse Toggle Styles */
+.workspace-panel.collapsed {
+  display: none !important;
+}
+.split-divider.collapsed {
+  display: none !important;
+}
+.btn-toggle-sidebar.active {
+  background-color: var(--accent-indigo-glow) !important;
+  border-color: var(--border-focus) !important;
+  color: white !important;
+}
+
+/* Dropdown Actions Styling */
+.toolbar-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.dropdown-trigger-btn {
+  background: var(--bg-control);
+  border: 1px solid var(--border-light);
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.dropdown-menu-list {
+  position: absolute;
+  bottom: 100%; /* Float UPWARDS so it doesn't cover selected text or input */
+  left: 50%;
+  transform: translate(-50%, -8px);
+  background: rgba(17, 24, 39, 0.95);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--border-radius-sm);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  min-width: 160px;
+  z-index: 1010;
+  gap: 2px;
+}
+
+.dropdown-item {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: var(--transition-smooth);
+  width: 100%;
+}
+
+.dropdown-item:hover {
+  color: white;
+  background-color: var(--bg-control-hover);
+}
+
+.dropdown-item svg {
+  fill: currentColor;
+}
+
