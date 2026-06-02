@@ -82,6 +82,12 @@
             <span>Toggle Workspace</span>
           </button>
           
+          <!-- Firebase Auth Profile widget -->
+          <button id="btn-auth-profile" class="btn btn-secondary btn-auth" title="Cloud Sync Account">
+            <span id="auth-status-icon" class="auth-status-icon">👤</span>
+            <span id="auth-status-text-display">Guest Session</span>
+          </button>
+          
           <!-- Key Settings -->
           <button id="btn-api-settings" class="btn btn-secondary btn-settings" title="AI Settings">
             <svg viewBox="0 0 24 24" width="16" height="16">
@@ -395,10 +401,10 @@
       </div>
       
       <!-- API Settings Modal Dialog -->
-      <dialog id="settings-dialog" class="settings-modal">
+      <dialog id="settings-dialog" class="settings-modal" closedby="any" aria-labelledby="settings-dialog-title">
         <div class="modal-content">
           <header class="modal-header">
-            <h3>AI Configuration</h3>
+            <h3 id="settings-dialog-title">AI Configuration</h3>
             <button id="btn-close-settings" class="btn-icon">
               <svg viewBox="0 0 24 24" width="20" height="20"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
             </button>
@@ -453,6 +459,46 @@
           <footer class="modal-footer">
             <button id="btn-save-settings" class="btn btn-primary">Save Changes</button>
           </footer>
+        </div>
+      </dialog>
+
+      <!-- Firebase Auth Settings Dialog -->
+      <dialog id="auth-dialog" class="settings-modal auth-modal" closedby="any" aria-labelledby="auth-dialog-title">
+        <div class="modal-content">
+          <header class="modal-header">
+            <h3 id="auth-dialog-title">Cloud Synchronization</h3>
+            <button id="btn-close-auth" class="btn-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+          </header>
+          
+          <div class="modal-body auth-modal-body">
+            <div class="auth-profile-card">
+              <div class="auth-avatar-large" id="auth-avatar-large">👤</div>
+              <h4 id="auth-user-name">Guest Student</h4>
+              <p id="auth-user-email">Anonymous Guest Session</p>
+              <span id="auth-cloud-badge" class="badge badge-demo">Local Temp Storage</span>
+            </div>
+            
+            <p class="auth-info-text">
+              By default, your highlights, notes, and progress are saved locally. Sign in with Google to enable permanent cloud backups and synchronize your workspace across devices.
+            </p>
+            
+            <div class="auth-actions-group">
+              <button id="btn-google-signin" class="btn btn-primary btn-large btn-google-login">
+                <svg viewBox="0 0 24 24" width="18" height="18" style="fill: currentColor; margin-right: 8px;">
+                  <path d="M21.35 11.1h-9.17v2.73h6.51c-.33 1.56-1.56 2.95-3.24 3.5v2.9h5.25c3.07-2.84 4.84-7 4.84-12.03 0-.7-.06-1.37-.19-2.1z" style="fill: #4285F4;"/>
+                  <path d="M12.18 21.43c2.75 0 5.06-.92 6.75-2.5l-5.25-2.9c-1.5.83-3.2.14-3.95-1.12H4.37v3.02c2.18 4.35 6.72 6.5 11.06 6.5z" style="fill: #34A853;"/>
+                  <path d="M4.37 14.93a7.19 7.19 0 0 1 0-4.04V7.87H1.12a12.02 12.02 0 0 0 0 10.08l3.25-3.02z" style="fill: #FBBC05;"/>
+                  <path d="M12.18 2.57c2.3 0 4.14 1.15 5.37 2.22l4-4C19.06-.57 15.93-2.18 12.18-2.18 7.84-2.18 3.3 1.34 1.12 7.87l3.25 3.02c.75-1.26 2.45-1.95 3.95-1.12l3.86-7.2z" style="fill: #EA4335;"/>
+                </svg>
+                Sign In with Google
+              </button>
+              <button id="btn-auth-signout" class="btn btn-secondary btn-large" style="display: none;">
+                Sign Out
+              </button>
+            </div>
+          </div>
         </div>
       </dialog>
       

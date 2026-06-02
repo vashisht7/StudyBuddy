@@ -1,4 +1,16 @@
 import './style.css';
+import { 
+  auth, 
+  db, 
+  signInAnonymously, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged,
+  doc,
+  setDoc,
+  getDoc
+} from './firebase.js';
 
 // PDF.js global setup
 const pdfjsLib = window.pdfjsLib;
@@ -22,6 +34,7 @@ let selectedTextPageNum = 1;
 let highlights = JSON.parse(localStorage.getItem('study_highlights') || '{}');
 let temporaryHighlight = null;
 let pdfPageImages = {};
+let currentUser = null;
 
 // Intersection Observer for PDF lazy rendering and scroll tracking
 let pageObserver = null;
@@ -41,6 +54,9 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Try loading API status
   updateApiStatusDisplay();
+  
+  // Initialize Firebase Auth
+  initFirebaseAuth();
 });
 
 // ==========================================================================
@@ -362,6 +378,13 @@ async function loadPdfDoc(pdfSource) {
     // Initialize observer for lazy rendering
     setupPageObserver();
     
+    // Auto restore position if currentPageNum is set
+    if (currentPageNum > 1) {
+      setTimeout(() => {
+        jumpToPage(currentPageNum);
+      }, 500);
+    }
+    
   } catch (err) {
     console.error("PDF load failure", err);
     addSystemChatMessage(`Error loading PDF document: ${err.message}`, "error");
@@ -424,6 +447,7 @@ function setupPageObserver() {
     if (currentPageNum !== currentInView) {
       currentPageNum = currentInView;
       document.getElementById('page-number-input').value = currentPageNum;
+      saveSessionToCloud();
     }
   }, 100));
 }
@@ -597,6 +621,7 @@ function initPdfControls() {
   function updateZoomDisplay() {
     document.getElementById('zoom-text').textContent = `${Math.round(pdfScale * 100)}%`;
     triggerPDFResize();
+    saveSessionToCloud();
   }
   
   // Page Nav inputs
@@ -1169,6 +1194,7 @@ function applyHighlight(color) {
   
   // Persist highlights
   localStorage.setItem('study_highlights', JSON.stringify(highlights));
+  saveSessionToCloud();
   
   // Force redraw highlight layer
   const layer = pageContainer.querySelector('.highlight-overlay-layer');
@@ -1203,6 +1229,7 @@ function initNotesEditor() {
   notesTextarea.addEventListener('input', () => {
     localStorage.setItem('study_notes', notesTextarea.value);
     showSaveStatus("Saved locally");
+    saveSessionToCloud();
   });
   
   // Formatting helper buttons
@@ -1436,6 +1463,7 @@ async function appendToLocalFile(text, pageNum = '') {
   editor.value += fullNote;
   editor.scrollTop = editor.scrollHeight;
   localStorage.setItem('study_notes', editor.value);
+  saveSessionToCloud();
   
   // 2. Try writing to connected file
   if (notesFileHandle) {
@@ -1968,6 +1996,7 @@ function initFlashcards() {
       flashcards = [];
       localStorage.removeItem('study_flashcards');
       updateFlashcardsUI();
+      saveSessionToCloud();
     }
   });
   
@@ -1982,6 +2011,7 @@ function addFlashcardsToDeck(newCards) {
   
   currentCardIndex = flashcards.length - newCards.length; // Jump to start of new cards
   updateFlashcardsUI();
+  saveSessionToCloud();
 }
 
 function updateFlashcardsUI() {
@@ -2331,4 +2361,244 @@ function initSidebarToggle() {
       }, 100);
     });
   }
+}
+
+// ==========================================================================
+// Cloud Synchronization Helpers (Firebase Auth & Cloud Firestore)
+// ==========================================================================
+
+// Standard Debounce Helper
+function debounce(func, delay) {
+  let timeoutId;
+  return function(...args) {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      func.apply(this, args);
+    }, delay);
+  };
+}
+
+// Debounced Cloud Session Save
+const saveSessionToCloud = debounce(async () => {
+  if (!currentUser) return;
+  
+  try {
+    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
+    const notesTextarea = document.getElementById('notes-textarea');
+    const notesContent = notesTextarea ? notesTextarea.value : '';
+    
+    await setDoc(sessionDocRef, {
+      currentPageNum: currentPageNum,
+      pdfScale: pdfScale,
+      notes: notesContent,
+      highlights: highlights,
+      flashcards: flashcards,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    
+    showSaveStatus("Saved & Synced to Cloud");
+  } catch (err) {
+    console.error("Cloud sync failed", err);
+    showSaveStatus("Saved locally (cloud sync offline)");
+  }
+}, 1000);
+
+// Load Cloud Session
+async function loadSessionFromCloud() {
+  if (!currentUser) return;
+  
+  try {
+    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
+    const docSnap = await getDoc(sessionDocRef);
+    
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      
+      // Update highlights
+      if (data.highlights) {
+        highlights = data.highlights;
+        localStorage.setItem('study_highlights', JSON.stringify(highlights));
+        
+        // Redraw highlights on active pages
+        const visiblePages = getVisiblePageNumbers();
+        visiblePages.forEach(num => {
+          const pageContainer = document.getElementById(`page-container-${num}`);
+          if (pageContainer) {
+            const layer = pageContainer.querySelector('.highlight-overlay-layer');
+            if (layer) {
+              renderHighlightsOnPage(num, layer);
+            }
+          }
+        });
+      }
+      
+      // Update notes
+      if (data.notes !== undefined) {
+        const notesTextarea = document.getElementById('notes-textarea');
+        if (notesTextarea) {
+          notesTextarea.value = data.notes;
+          localStorage.setItem('study_notes', data.notes);
+        }
+      }
+      
+      // Update flashcards
+      if (data.flashcards) {
+        flashcards = data.flashcards;
+        localStorage.setItem('study_flashcards', JSON.stringify(flashcards));
+        updateFlashcardsUI();
+      }
+      
+      // Update zoom level
+      if (data.pdfScale && data.pdfScale !== pdfScale) {
+        pdfScale = data.pdfScale;
+        const zoomText = document.getElementById('zoom-text');
+        if (zoomText) zoomText.textContent = `${Math.round(pdfScale * 100)}%`;
+        triggerPDFResize();
+      }
+      
+      // Update reading position
+      if (data.currentPageNum && data.currentPageNum !== currentPageNum) {
+        if (pdfDoc) {
+          setTimeout(() => {
+            jumpToPage(data.currentPageNum);
+          }, 500);
+        } else {
+          currentPageNum = data.currentPageNum;
+        }
+      }
+      
+      addSystemChatMessage("Study session successfully restored from cloud sync.", "success");
+    }
+  } catch (err) {
+    console.error("Failed to load session from cloud", err);
+    addSystemChatMessage("Could not restore session from cloud. Using local storage backup.", "warning");
+  }
+}
+
+// Initialize Auth listeners and handlers
+function initFirebaseAuth() {
+  const profileBtn = document.getElementById('btn-auth-profile');
+  const authDialog = document.getElementById('auth-dialog');
+  const closeAuthBtn = document.getElementById('btn-close-auth');
+  const googleSigninBtn = document.getElementById('btn-google-signin');
+  const signoutBtn = document.getElementById('btn-auth-signout');
+  
+  const statusIcon = document.getElementById('auth-status-icon');
+  const statusText = document.getElementById('auth-status-text-display');
+  const avatarLarge = document.getElementById('auth-avatar-large');
+  const userName = document.getElementById('auth-user-name');
+  const userEmail = document.getElementById('auth-user-email');
+  const cloudBadge = document.getElementById('auth-cloud-badge');
+
+  if (profileBtn) {
+    profileBtn.addEventListener('click', () => {
+      authDialog.showModal();
+    });
+  }
+
+  if (closeAuthBtn) {
+    closeAuthBtn.addEventListener('click', () => {
+      authDialog.close();
+    });
+  }
+
+  // Handle outside click close fallback as per modern guidance
+  if (authDialog && !('closedBy' in HTMLDialogElement.prototype)) {
+    authDialog.addEventListener('click', (event) => {
+      if (event.target !== authDialog) return;
+      const rect = authDialog.getBoundingClientRect();
+      const isDialogContent = (
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width
+      );
+      if (!isDialogContent) {
+        authDialog.close();
+      }
+    });
+  }
+
+  // Google Sign-In
+  if (googleSigninBtn) {
+    googleSigninBtn.addEventListener('click', async () => {
+      const provider = new GoogleAuthProvider();
+      try {
+        addSystemChatMessage("Signing in with Google...", "primary");
+        await signInWithPopup(auth, provider);
+        authDialog.close();
+      } catch (err) {
+        console.error("Google sign in failed", err);
+        addSystemChatMessage(`Google Sign-In failed: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Sign Out
+  if (signoutBtn) {
+    signoutBtn.addEventListener('click', async () => {
+      try {
+        addSystemChatMessage("Signing out...", "primary");
+        await signOut(auth);
+        authDialog.close();
+      } catch (err) {
+        console.error("Sign out failed", err);
+        addSystemChatMessage(`Sign out failed: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Listen to Auth State Changes
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      currentUser = user;
+      
+      const isAnonymous = user.isAnonymous;
+      if (isAnonymous) {
+        if (statusIcon) statusIcon.textContent = "👤";
+        if (statusText) statusText.textContent = "Guest Session";
+        if (avatarLarge) avatarLarge.textContent = "👤";
+        if (userName) userName.textContent = "Guest Student";
+        if (userEmail) userEmail.textContent = "Anonymous Guest Session";
+        if (cloudBadge) {
+          cloudBadge.className = "badge badge-demo";
+          cloudBadge.textContent = "Local Temp Storage";
+        }
+        
+        if (googleSigninBtn) googleSigninBtn.style.display = "flex";
+        if (signoutBtn) signoutBtn.style.display = "none";
+      } else {
+        const photoURL = user.photoURL;
+        if (photoURL) {
+          if (statusIcon) statusIcon.innerHTML = `<img src="${photoURL}" alt="avatar" style="width:18px; height:18px; border-radius:50%; vertical-align:middle; object-fit:cover;" />`;
+          if (avatarLarge) avatarLarge.innerHTML = `<img src="${photoURL}" alt="avatar" style="width:64px; height:64px; border-radius:50%; object-fit:cover;" />`;
+        } else {
+          if (statusIcon) statusIcon.textContent = "🎓";
+          if (avatarLarge) avatarLarge.textContent = "🎓";
+        }
+        
+        if (statusText) statusText.textContent = user.displayName || user.email || "Student";
+        if (userName) userName.textContent = user.displayName || "Google Student";
+        if (userEmail) userEmail.textContent = user.email || "Google Account Connected";
+        if (cloudBadge) {
+          cloudBadge.className = "badge badge-active";
+          cloudBadge.textContent = "Cloud Sync Active";
+        }
+        
+        if (googleSigninBtn) googleSigninBtn.style.display = "none";
+        if (signoutBtn) signoutBtn.style.display = "flex";
+      }
+
+      await loadSessionFromCloud();
+      
+    } else {
+      currentUser = null;
+      try {
+        await signInAnonymously(auth);
+      } catch (err) {
+        console.error("Anonymous auth failed", err);
+        addSystemChatMessage("Cloud Sync authentication offline. Using local backup storage.", "warning");
+      }
+    }
+  });
 }
