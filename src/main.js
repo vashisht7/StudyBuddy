@@ -1535,22 +1535,49 @@ function initFloatingToolbar() {
       
       // Render the temporary visual highlight overlay
       updateTemporaryHighlight(processed.highlightsMap);
-      
-      // Position and show toolbar
-      const resultSec = document.getElementById('toolbar-result-section');
-      if (resultSec && resultSec.style.display === 'none') {
-        try {
-          const rect = getRangeBoundingClientRect(cachedSelectionRange);
-          positionToolbar(rect);
-        } catch (err) {
-          console.warn("[StudyBuddy] Error positioning toolbar:", err);
-        }
-      }
     }, 150);
   };
   
   document.addEventListener('mouseup', handleSelectionEnd);
   document.addEventListener('keyup', handleSelectionEnd);
+  
+  // Right-click context menu listener to show the floating toolbar
+  document.addEventListener('contextmenu', (e) => {
+    // If clicking inside the toolbar itself, allow normal behavior
+    if (toolbar.contains(e.target)) {
+      return;
+    }
+    
+    const selection = window.getSelection();
+    const selectionStr = selection.toString().trim();
+    const scrollContainer = document.getElementById('pdf-scroll-container');
+    
+    // Only show toolbar if there's active selection text and right-click is inside PDF viewer
+    if (selectionStr && selectedText && scrollContainer && scrollContainer.contains(e.target)) {
+      e.preventDefault(); // Intercept browser context menu
+      
+      const resultSec = document.getElementById('toolbar-result-section');
+      if (resultSec && resultSec.style.display === 'none') {
+        const toolbarWidth = 390;
+        const toolbarHeight = 110;
+        
+        let left = e.clientX - toolbarWidth / 2;
+        let top = e.clientY - toolbarHeight - 10;
+        
+        // Boundary containment checks
+        if (left < 10) left = 10;
+        if (left + toolbarWidth > window.innerWidth - 10) left = window.innerWidth - toolbarWidth - 10;
+        
+        if (top < 10) {
+          top = e.clientY + 10;
+        }
+        
+        toolbar.style.left = `${left}px`;
+        toolbar.style.top = `${top}px`;
+        toolbar.style.display = 'flex';
+      }
+    }
+  });
   
   function positionToolbar(selectionRect) {
     const toolbarWidth = 390; // Expanded width for highlights & format actions
