@@ -289,6 +289,40 @@ function processPdfSelection(selection) {
   };
 }
 
+function getRangeBoundingClientRect(range) {
+  const rects = range.getClientRects();
+  if (rects.length === 0) {
+    return range.getBoundingClientRect();
+  }
+  
+  let minLeft = Infinity;
+  let minTop = Infinity;
+  let maxRight = -Infinity;
+  let maxBottom = -Infinity;
+  
+  for (const r of rects) {
+    if (r.width > 0 && r.height > 0) {
+      if (r.left < minLeft) minLeft = r.left;
+      if (r.top < minTop) minTop = r.top;
+      if (r.right > maxRight) maxRight = r.right;
+      if (r.bottom > maxBottom) maxBottom = r.bottom;
+    }
+  }
+  
+  if (minLeft === Infinity) {
+    return range.getBoundingClientRect();
+  }
+  
+  return {
+    left: minLeft,
+    top: minTop,
+    right: maxRight,
+    bottom: maxBottom,
+    width: maxRight - minLeft,
+    height: maxBottom - minTop
+  };
+}
+
 function isCaptionLine(text) {
   if (/^\s*(figure|fig|table|chart|image|diagram|plate)\b\.?\s*\d*[:.\-–—]/i.test(text)) {
     return true;
@@ -1470,7 +1504,7 @@ function initFloatingToolbar() {
       const selection = window.getSelection();
       const selectionStr = selection.toString().trim();
       
-      if (!selectionStr || !selectedText) {
+      if (!selectionStr) {
         const resultSec = document.getElementById('toolbar-result-section');
         if (resultSec && resultSec.style.display === 'none') {
           clearTemporaryHighlight();
@@ -1480,31 +1514,37 @@ function initFloatingToolbar() {
         return;
       }
       
-      // Check if selection is inside PDF
-      let node = selection.anchorNode;
-      let isInsidePdf = false;
-      while (node) {
-        if (node.classList && node.classList.contains('pdf-page-container')) {
-          isInsidePdf = true;
-          break;
+      // Re-process selection immediately at selection end to avoid race conditions
+      const processed = processPdfSelection(selection);
+      if (!processed) {
+        const resultSec = document.getElementById('toolbar-result-section');
+        if (resultSec && resultSec.style.display === 'none') {
+          clearTemporaryHighlight();
+          toolbar.style.display = 'none';
+          collapseToolbarResult();
         }
-        node = node.parentNode;
-      }
-      
-      if (!isInsidePdf) {
         return;
       }
+      
+      // Update final state variables
+      cachedSelectionRange = selection.getRangeAt(0).cloneRange();
+      selectedText = processed.selectedText;
+      selectedTextPageNum = processed.firstPageNum;
+      selectionHighlightsMap = processed.highlightsMap;
+      selectedPagesList = processed.pagesList;
+      
+      // Render the temporary visual highlight overlay
+      updateTemporaryHighlight(processed.highlightsMap);
       
       // Position and show toolbar
       const resultSec = document.getElementById('toolbar-result-section');
       if (resultSec && resultSec.style.display === 'none') {
         try {
-          if (selection.rangeCount > 0) {
-            cachedSelectionRange = selection.getRangeAt(0).cloneRange();
-            const rect = cachedSelectionRange.getBoundingClientRect();
-            positionToolbar(rect);
-          }
-        } catch (err) {}
+          const rect = getRangeBoundingClientRect(cachedSelectionRange);
+          positionToolbar(rect);
+        } catch (err) {
+          console.warn("[StudyBuddy] Error positioning toolbar:", err);
+        }
       }
     }, 150);
   };
