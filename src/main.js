@@ -17,8 +17,8 @@ const pdfjsLib = window.pdfjsLib;
 
 // Application State
 let pdfDoc = null;
-let pdfScale = 1.2;
-let currentPageNum = 1;
+let pdfScale = parseFloat(localStorage.getItem('study_pdf_scale') || '1.2');
+let currentPageNum = parseInt(localStorage.getItem('study_page_num') || '1');
 let pdfPagesCount = 0;
 let isRenderingPage = {};
 let pageRenderTasks = {};
@@ -31,13 +31,703 @@ let flashcards = JSON.parse(localStorage.getItem('study_flashcards') || '[]');
 let currentCardIndex = 0;
 let selectedText = '';
 let selectedTextPageNum = 1;
+let selectionHighlightsMap = {};
+let selectedPagesList = [];
 let highlights = JSON.parse(localStorage.getItem('study_highlights') || '{}');
 let temporaryHighlight = null;
 let pdfPageImages = {};
 let currentUser = null;
+let activeAiResponse = '';
+
+function cleanPdfText(text) {
+  if (!text) return '';
+  return text
+    // Replace multiple newlines with a special placeholder
+    .replace(/\r?\n\s*\r?\n/g, '___PARAGRAPH_BREAK___')
+    // Replace single newlines (PDF line wraps) with a space
+    .replace(/\r?\n/g, ' ')
+    // Replace multiple consecutive spaces with a single space
+    .replace(/\s+/g, ' ')
+    // Restore the paragraph breaks as double newlines
+    .replace(/___PARAGRAPH_BREAK___/g, '\n\n')
+    .trim();
+}
+
+function processPdfSelection(selection) {
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+  
+  const range = selection.getRangeAt(0);
+  let startPageNum = null;
+  let endPageNum = null;
+  
+  // Find start page container
+  let node = range.startContainer;
+  while (node) {
+    if (node.classList && node.classList.contains('pdf-page-container')) {
+      startPageNum = parseInt(node.getAttribute('data-page'));
+      break;
+    }
+    node = node.parentNode;
+  }
+  
+  // Find end page container
+  node = range.endContainer;
+  while (node) {
+    if (node.classList && node.classList.contains('pdf-page-container')) {
+      endPageNum = parseInt(node.getAttribute('data-page'));
+      break;
+    }
+    node = node.parentNode;
+  }
+  
+  if (!startPageNum && !endPageNum) {
+    return null;
+  }
+  if (!startPageNum) startPageNum = endPageNum;
+  if (!endPageNum) endPageNum = startPageNum;
+  
+  const minPage = Math.min(startPageNum, endPageNum);
+  const maxPage = Math.max(startPageNum, endPageNum);
+  
+  const highlightsMap = {};
+  const pageTexts = [];
+  const pagesList = [];
+  
+  for (let pNum = minPage; pNum <= maxPage; pNum++) {
+    const pageContainer = document.getElementById(`page-container-${pNum}`);
+    if (!pageContainer) continue;
+    
+    const textLayer = pageContainer.querySelector('.textLayer');
+    if (!textLayer) continue;
+    
+    const spans = textLayer.querySelectorAll('span');
+    const pageRect = pageContainer.getBoundingClientRect();
+    const pageHeight = pageRect.height;
+    
+    // Get all spans that are in the selection
+    const selectedSpans = [];
+    spans.forEach(span => {
+      if (selection.containsNode(span, true)) {
+        selectedSpans.push(span);
+      }
+    });
+    
+    if (selectedSpans.length === 0) continue;
+    
+    // Group spans by position and build line structures
+    const spanInfos = selectedSpans.map(span => {
+      const spanRange = document.createRange();
+      spanRange.selectNodeContents(span);
+      
+      if (span.contains(range.startContainer) || span === range.startContainer) {
+        if (range.startContainer.nodeType === Node.TEXT_NODE) {
+          spanRange.setStart(range.startContainer, range.startOffset);
+        } else {
+          spanRange.setStart(span, 0);
+        }
+      }
+      if (span.contains(range.endContainer) || span === range.endContainer) {
+        if (range.endContainer.nodeType === Node.TEXT_NODE) {
+          spanRange.setEnd(range.endContainer, range.endOffset);
+        } else {
+          spanRange.setEnd(span, span.childNodes.length);
+        }
+      }
+      
+      const rect = spanRange.getBoundingClientRect();
+      const text = spanRange.toString();
+      
+      return {
+        span: span,
+        rect: rect,
+        left: rect.left - pageRect.left,
+        top: rect.top - pageRect.top,
+        width: rect.width,
+        height: rect.height,
+        text: text
+      };
+    }).filter(info => info.text.trim().length > 0 && info.width > 0 && info.height > 0);
+    
+    if (spanInfos.length === 0) continue;
+    
+    // Sort spanInfos by top position, then by left position
+    spanInfos.sort((a, b) => {
+      if (Math.abs(a.top - b.top) < 4) {
+        return a.left - b.left;
+      }
+      return a.top - b.top;
+    });
+    
+    // Group spanInfos into lines
+    const lines = [];
+    let currentLine = [];
+    
+    spanInfos.forEach(info => {
+      if (currentLine.length === 0) {
+        currentLine.push(info);
+      } else {
+        const lastInfo = currentLine[currentLine.length - 1];
+        const verticalDiff = Math.abs(info.top - lastInfo.top);
+        const threshold = Math.min(info.height, lastInfo.height) * 0.6;
+        if (verticalDiff <= Math.max(5, threshold)) {
+          currentLine.push(info);
+        } else {
+          lines.push(currentLine);
+          currentLine = [info];
+        }
+      }
+    });
+    if (currentLine.length > 0) {
+      lines.push(currentLine);
+    }
+    
+    // Filter noise lines and collect valid spans/text
+    const validRects = [];
+    let prevLineBottom = null;
+    let accumulatedPageText = '';
+    
+    lines.forEach(line => {
+      let lineText = '';
+      for (let i = 0; i < line.length; i++) {
+        const info = line[i];
+        if (i > 0) {
+          const prevInfo = line[i - 1];
+          const gap = info.left - (prevInfo.left + prevInfo.width);
+          const needsSpace = gap > 2 && !prevInfo.text.endsWith(' ') && !info.text.startsWith(' ');
+          if (needsSpace) {
+            lineText += ' ';
+          }
+        }
+        lineText += info.text;
+      }
+      
+      const trimmedLineText = lineText.trim();
+      if (!trimmedLineText) return;
+      
+      const avgTop = line.reduce((sum, info) => sum + info.top, 0) / line.length;
+      const avgHeight = line.reduce((sum, info) => sum + info.height, 0) / line.length;
+      const avgBottom = pageHeight - (avgTop + avgHeight);
+      
+      const relativeTopScaled = avgTop / pdfScale;
+      const relativeBottomScaled = avgBottom / pdfScale;
+      
+      let isNoise = false;
+      
+      const isPageNum = /^\s*(page\s*\|?\s*)?(\d+|[ivxldm]+)(\s+of\s+\d+)?\s*$/i.test(trimmedLineText);
+      if (isPageNum && (relativeTopScaled < 75 || relativeBottomScaled < 75)) {
+        isNoise = true;
+      }
+      
+      if (!isNoise && relativeTopScaled < 70) {
+        const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
+        if (isAllCaps || trimmedLineText.length < 80 || /^\d+(\.\d+)*\s+[A-Z]/i.test(trimmedLineText) || /chapter/i.test(trimmedLineText)) {
+          isNoise = true;
+        }
+      }
+      
+      if (!isNoise && relativeBottomScaled < 70) {
+        const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
+        if (isAllCaps || trimmedLineText.length < 80 || /chapter/i.test(trimmedLineText)) {
+          isNoise = true;
+        }
+      }
+      
+      if (!isNoise) {
+        if (isCaptionLine(trimmedLineText)) {
+          isNoise = true;
+        }
+      }
+      
+      if (isNoise) {
+        console.log(`[StudyBuddy] Filtered noise line: "${trimmedLineText}" (Top: ${relativeTopScaled.toFixed(1)}, Bottom: ${relativeBottomScaled.toFixed(1)})`);
+        return;
+      }
+      
+      line.forEach(info => {
+        validRects.push({
+          left: info.left / pdfScale,
+          top: info.top / pdfScale,
+          width: info.width / pdfScale,
+          height: info.height / pdfScale
+        });
+      });
+      
+      if (accumulatedPageText.length > 0) {
+        const gap = avgTop - prevLineBottom;
+        const prevHeight = line[0].height;
+        if (gap > prevHeight * 1.5) {
+          accumulatedPageText += '\n\n';
+        } else {
+          accumulatedPageText += '\n';
+        }
+      }
+      
+      accumulatedPageText += lineText;
+      prevLineBottom = avgTop + avgHeight;
+    });
+    
+    if (validRects.length > 0) {
+      highlightsMap[pNum] = validRects;
+      pageTexts.push(accumulatedPageText);
+      pagesList.push(pNum);
+    }
+  }
+  
+  if (pagesList.length === 0) {
+    return null;
+  }
+  
+  const combinedText = pageTexts.join('\n\n');
+  
+  return {
+    selectedText: cleanPdfText(combinedText),
+    highlightsMap: highlightsMap,
+    pagesList: pagesList,
+    firstPageNum: pagesList[0]
+  };
+}
+
+function isCaptionLine(text) {
+  if (/^\s*(figure|fig|table|chart|image|diagram|plate)\b\.?\s*\d*[:.\-–—]/i.test(text)) {
+    return true;
+  }
+  if (text.length < 150 && /^\s*(figure|fig|table|chart|image|diagram|plate)\b\.?\s*\d+/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function cleanRenderedTextLayer(pageContainer, textLayerDiv) {
+  const spans = textLayerDiv.querySelectorAll('span');
+  if (spans.length === 0) return;
+  
+  const pageRect = pageContainer.getBoundingClientRect();
+  const pageHeight = pageRect.height;
+  
+  // Group spans by position and build line structures
+  const spanInfos = Array.from(spans).map(span => {
+    const rect = span.getBoundingClientRect();
+    return {
+      span: span,
+      rect: rect,
+      left: rect.left - pageRect.left,
+      top: rect.top - pageRect.top,
+      width: rect.width,
+      height: rect.height,
+      text: span.textContent
+    };
+  });
+  
+  // Sort spanInfos by top position, then by left position
+  spanInfos.sort((a, b) => {
+    if (Math.abs(a.top - b.top) < 4) {
+      return a.left - b.left;
+    }
+    return a.top - b.top;
+  });
+  
+  // Group spanInfos into lines
+  const lines = [];
+  let currentLine = [];
+  
+  spanInfos.forEach(info => {
+    if (currentLine.length === 0) {
+      currentLine.push(info);
+    } else {
+      const lastInfo = currentLine[currentLine.length - 1];
+      const verticalDiff = Math.abs(info.top - lastInfo.top);
+      const threshold = Math.min(info.height, lastInfo.height) * 0.6;
+      if (verticalDiff <= Math.max(5, threshold)) {
+        currentLine.push(info);
+      } else {
+        lines.push(currentLine);
+        currentLine = [info];
+      }
+    }
+  });
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  }
+  
+  // Check each line and mark noise spans as unselectable
+  lines.forEach(line => {
+    // Reconstruct line text
+    let lineText = '';
+    for (let i = 0; i < line.length; i++) {
+      const info = line[i];
+      if (i > 0) {
+        const prevInfo = line[i - 1];
+        const gap = info.left - (prevInfo.left + prevInfo.width);
+        const needsSpace = gap > 2 && !prevInfo.text.endsWith(' ') && !info.text.startsWith(' ');
+        if (needsSpace) {
+          lineText += ' ';
+        }
+      }
+      lineText += info.text;
+    }
+    
+    const trimmedLineText = lineText.trim();
+    if (!trimmedLineText) return;
+    
+    // Calculate average position
+    const avgTop = line.reduce((sum, info) => sum + info.top, 0) / line.length;
+    const avgHeight = line.reduce((sum, info) => sum + info.height, 0) / line.length;
+    const avgBottom = pageHeight - (avgTop + avgHeight);
+    
+    // Scale positions to PDF scale (points/pixels)
+    const relativeTopScaled = avgTop / pdfScale;
+    const relativeBottomScaled = avgBottom / pdfScale;
+    
+    let isNoise = false;
+    
+    // 1. Page numbers / page indicators
+    const isPageNum = /^\s*(page\s*\|?\s*)?(\d+|[ivxldm]+)(\s+of\s+\d+)?\s*$/i.test(trimmedLineText);
+    if (isPageNum && (relativeTopScaled < 75 || relativeBottomScaled < 75)) {
+      isNoise = true;
+    }
+    
+    // 2. Running headers (top zone)
+    if (!isNoise && relativeTopScaled < 70) {
+      const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
+      if (isAllCaps || trimmedLineText.length < 80 || /^\d+(\.\d+)*\s+[A-Z]/i.test(trimmedLineText) || /chapter/i.test(trimmedLineText)) {
+        isNoise = true;
+      }
+    }
+    
+    // 3. Running footers (bottom zone)
+    if (!isNoise && relativeBottomScaled < 70) {
+      const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
+      if (isAllCaps || trimmedLineText.length < 80 || /chapter/i.test(trimmedLineText)) {
+        isNoise = true;
+      }
+    }
+    
+    // 4. Image / figure / table descriptions
+    if (!isNoise) {
+      if (isCaptionLine(trimmedLineText)) {
+        isNoise = true;
+      }
+    }
+    
+    if (isNoise) {
+      line.forEach(info => {
+        info.span.style.userSelect = 'none';
+        info.span.style.webkitUserSelect = 'none';
+        info.span.style.pointerEvents = 'none';
+        info.span.classList.add('pdf-noise-text');
+      });
+    }
+  });
+}
+
+function cleanUpOffscreenPages() {
+  const scrollContainer = document.getElementById('pdf-scroll-container');
+  if (!scrollContainer) return;
+  const containerRect = scrollContainer.getBoundingClientRect();
+  
+  const pages = document.querySelectorAll('.pdf-page-container');
+  pages.forEach(pageContainer => {
+    const pageNum = parseInt(pageContainer.getAttribute('data-page'));
+    // If it's currently selected, do not unrender
+    if (selectedPagesList && selectedPagesList.includes(pageNum)) {
+      return;
+    }
+    
+    // Check if it's offscreen (using the same 150px buffer as IntersectionObserver)
+    const rect = pageContainer.getBoundingClientRect();
+    const isOffscreen = (rect.bottom < containerRect.top - 150) || (rect.top > containerRect.bottom + 150);
+    
+    // If it is offscreen and currently rendered, unrender it
+    if (isOffscreen && !isRenderingPage[pageNum] && pageContainer.querySelector('canvas')) {
+      console.log(`[StudyBuddy] Cleaned up offscreen page ${pageNum}`);
+      unrenderPage(pageNum);
+    }
+  });
+}
 
 // Intersection Observer for PDF lazy rendering and scroll tracking
 let pageObserver = null;
+
+// ==========================================================================
+// Local Storage for Large Files (IndexedDB)
+// ==========================================================================
+const DB_NAME = 'StudyBuddyDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'pdf_store';
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function savePdfToIndexedDB(arrayBuffer, fileName) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put({ arrayBuffer, fileName }, 'active_pdf');
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.error('Failed to save PDF to IndexedDB:', err);
+  }
+}
+
+async function getPdfFromIndexedDB() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get('active_pdf');
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error('Failed to get PDF from IndexedDB:', err);
+    return null;
+  }
+}
+
+async function restorePersistedPdf() {
+  try {
+    const saved = await getPdfFromIndexedDB();
+    if (saved && saved.arrayBuffer) {
+      // Clear and hide welcome
+      document.getElementById('welcome-screen').style.display = 'none';
+      const scrollContainer = document.getElementById('pdf-scroll-container');
+      scrollContainer.style.display = 'flex';
+      
+      addSystemChatMessage(`Restoring saved document: <strong>${saved.fileName}</strong>...`, "primary");
+      
+      const typedarray = new Uint8Array(saved.arrayBuffer);
+      await loadPdfDoc(typedarray);
+    }
+  } catch (err) {
+    console.error("Failed to restore PDF from IndexedDB", err);
+  }
+}
+
+// ==========================================================================
+// Area Capture (Snipping) Tool
+// ==========================================================================
+let isCaptureModeActive = false;
+let captureStartPageNum = null;
+let captureStartX = 0;
+let captureStartY = 0;
+let captureSelectionBox = null;
+let activeCapturePageContainer = null;
+
+function initCaptureMode() {
+  const btnCapture = document.getElementById('btn-capture-mode');
+  const scrollContainer = document.getElementById('pdf-scroll-container');
+  if (!btnCapture || !scrollContainer) return;
+
+  btnCapture.addEventListener('click', () => {
+    toggleCaptureMode();
+  });
+
+  // Event delegation on page containers
+  scrollContainer.addEventListener('mousedown', (e) => {
+    if (!isCaptureModeActive) return;
+    
+    // Find closest page container
+    const pageContainer = e.target.closest('.pdf-page-container');
+    if (!pageContainer) return;
+    
+    e.preventDefault();
+    activeCapturePageContainer = pageContainer;
+    captureStartPageNum = parseInt(pageContainer.getAttribute('data-page'));
+    
+    const rect = pageContainer.getBoundingClientRect();
+    captureStartX = e.clientX - rect.left;
+    captureStartY = e.clientY - rect.top;
+    
+    // Create selection box element
+    captureSelectionBox = document.createElement('div');
+    captureSelectionBox.className = 'capture-selection-box';
+    captureSelectionBox.style.left = `${captureStartX}px`;
+    captureSelectionBox.style.top = `${captureStartY}px`;
+    captureSelectionBox.style.width = '0px';
+    captureSelectionBox.style.height = '0px';
+    
+    pageContainer.appendChild(captureSelectionBox);
+    
+    // Listen for mousemove and mouseup on document to handle bounds outside the container
+    document.addEventListener('mousemove', onCaptureMouseMove);
+    document.addEventListener('mouseup', onCaptureMouseUp);
+  });
+}
+
+function toggleCaptureMode(forceState) {
+  const btnCapture = document.getElementById('btn-capture-mode');
+  const scrollContainer = document.getElementById('pdf-scroll-container');
+  if (!btnCapture || !scrollContainer) return;
+
+  isCaptureModeActive = forceState !== undefined ? forceState : !isCaptureModeActive;
+
+  if (isCaptureModeActive) {
+    btnCapture.classList.add('active');
+    scrollContainer.classList.add('capture-mode-active');
+    addSystemChatMessage("📸 <strong>Capture Mode Active</strong>: Click and drag over any part of the PDF to copy it as an image.", "primary");
+  } else {
+    btnCapture.classList.remove('active');
+    scrollContainer.classList.remove('capture-mode-active');
+    // Clean up box if it exists
+    if (captureSelectionBox && captureSelectionBox.parentNode) {
+      captureSelectionBox.parentNode.removeChild(captureSelectionBox);
+    }
+    captureSelectionBox = null;
+    activeCapturePageContainer = null;
+  }
+}
+
+function onCaptureMouseMove(e) {
+  if (!activeCapturePageContainer || !captureSelectionBox) return;
+  
+  const rect = activeCapturePageContainer.getBoundingClientRect();
+  const currentX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+  const currentY = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+  
+  const x = Math.min(captureStartX, currentX);
+  const y = Math.min(captureStartY, currentY);
+  const width = Math.abs(captureStartX - currentX);
+  const height = Math.abs(captureStartY - currentY);
+  
+  captureSelectionBox.style.left = `${x}px`;
+  captureSelectionBox.style.top = `${y}px`;
+  captureSelectionBox.style.width = `${width}px`;
+  captureSelectionBox.style.height = `${height}px`;
+}
+
+async function onCaptureMouseUp(e) {
+  document.removeEventListener('mousemove', onCaptureMouseMove);
+  document.removeEventListener('mouseup', onCaptureMouseUp);
+  
+  if (!activeCapturePageContainer || !captureSelectionBox) return;
+  
+  const width = parseFloat(captureSelectionBox.style.width);
+  const height = parseFloat(captureSelectionBox.style.height);
+  const left = parseFloat(captureSelectionBox.style.left);
+  const top = parseFloat(captureSelectionBox.style.top);
+  
+  // Clean up the UI selection box immediately
+  if (captureSelectionBox && captureSelectionBox.parentNode) {
+    captureSelectionBox.parentNode.removeChild(captureSelectionBox);
+  }
+  captureSelectionBox = null;
+  
+  const targetPageNum = captureStartPageNum;
+  const pageContainer = activeCapturePageContainer;
+  
+  // Deactivate capture mode visually
+  toggleCaptureMode(false);
+  
+  if (width < 5 || height < 5) {
+    // Too small, user probably just clicked without dragging
+    activeCapturePageContainer = null;
+    return;
+  }
+  
+  try {
+    const canvas = pageContainer.querySelector('canvas');
+    if (!canvas) throw new Error("Could not find canvas on page.");
+    
+    const canvasRect = canvas.getBoundingClientRect();
+    
+    // Map selection coordinates to actual raw canvas coordinates
+    const scaleX = canvas.width / canvasRect.width;
+    const scaleY = canvas.height / canvasRect.height;
+    
+    const cropX = left * scaleX;
+    const cropY = top * scaleY;
+    const cropWidth = width * scaleX;
+    const cropHeight = height * scaleY;
+    
+    // Draw cropped portion to an offscreen canvas
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropWidth;
+    cropCanvas.height = cropHeight;
+    const cropCtx = cropCanvas.getContext('2d');
+    
+    cropCtx.drawImage(canvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    
+    const base64Data = cropCanvas.toDataURL('image/png');
+    
+    // 1. Copy image to Clipboard as PNG Blob
+    cropCanvas.toBlob(async (blob) => {
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]);
+        addSystemChatMessage(`📸 Successfully captured area of page ${targetPageNum} and copied it to your clipboard!`, "success");
+      } catch (err) {
+        console.error("Clipboard copy failure", err);
+      }
+    }, 'image/png');
+    
+    // 2. Show confirm dialog to Add to Notes or Discard
+    const captureDialog = document.getElementById('capture-dialog');
+    const previewImg = document.getElementById('capture-preview-img');
+    const btnDiscard = document.getElementById('btn-capture-discard');
+    const btnAddNote = document.getElementById('btn-capture-add-note');
+    
+    if (captureDialog && previewImg && btnDiscard && btnAddNote) {
+      previewImg.src = base64Data;
+      
+      // Clean up previous event listeners (to prevent duplicate additions)
+      const newBtnDiscard = btnDiscard.cloneNode(true);
+      const newBtnAddNote = btnAddNote.cloneNode(true);
+      btnDiscard.parentNode.replaceChild(newBtnDiscard, btnDiscard);
+      btnAddNote.parentNode.replaceChild(newBtnAddNote, btnAddNote);
+      
+      newBtnDiscard.addEventListener('click', () => {
+        captureDialog.close();
+      });
+      
+      newBtnAddNote.addEventListener('click', () => {
+        const notesTextarea = document.getElementById('notes-textarea');
+        if (notesTextarea) {
+          const markdownImage = `\n\n![Captured Image (Page ${targetPageNum})](${base64Data})\n\n`;
+          notesTextarea.value += markdownImage;
+          
+          // Trigger autosave/sync
+          localStorage.setItem('study_notes', notesTextarea.value);
+          saveSessionToCloud();
+          
+          // Switch to Notes tab
+          const notesTabBtn = document.getElementById('tab-btn-notes');
+          if (notesTabBtn) {
+            notesTabBtn.click();
+          }
+          addSystemChatMessage("Appended captured image directly to your study notes workspace.", "success");
+        }
+        captureDialog.close();
+      });
+      
+      captureDialog.showModal();
+    }
+    
+  } catch (err) {
+    console.error("Area capture failed", err);
+    addSystemChatMessage(`Area capture failed: ${err.message}`, "error");
+  }
+  
+  activeCapturePageContainer = null;
+}
 
 // Initialize application on load
 document.addEventListener('DOMContentLoaded', () => {
@@ -51,9 +741,13 @@ document.addEventListener('DOMContentLoaded', () => {
   initFlashcards();
   initImageSelectionTracker();
   initSidebarToggle();
+  initCaptureMode();
   
   // Try loading API status
   updateApiStatusDisplay();
+  
+  // Restore PDF from IndexedDB if it exists
+  restorePersistedPdf();
   
   // Initialize Firebase Auth
   initFirebaseAuth();
@@ -317,7 +1011,21 @@ function initUploads() {
     const scrollContainer = document.getElementById('pdf-scroll-container');
     scrollContainer.style.display = 'flex';
     
-    loadPdfDoc(sampleUrl);
+    fetch(sampleUrl)
+      .then(res => {
+        if (!res.ok) throw new Error("Failed to fetch sample PDF");
+        return res.arrayBuffer();
+      })
+      .then(async (arrayBuffer) => {
+        const typedarray = new Uint8Array(arrayBuffer);
+        loadPdfDoc(typedarray);
+        await savePdfToIndexedDB(arrayBuffer, 'sample.pdf');
+      })
+      .catch(err => {
+        console.error("Failed to load sample", err);
+        addSystemChatMessage("Failed to fetch sample PDF from server. Attempting standard load...", "warning");
+        loadPdfDoc(sampleUrl);
+      });
   });
 }
 
@@ -330,9 +1038,11 @@ function loadLocalPdfFile(file) {
   addSystemChatMessage(`Loading PDF: <strong>${file.name}</strong>...`, "primary");
   
   const fileReader = new FileReader();
-  fileReader.onload = function() {
-    const typedarray = new Uint8Array(this.result);
+  fileReader.onload = async function() {
+    const arrayBuffer = this.result;
+    const typedarray = new Uint8Array(arrayBuffer);
     loadPdfDoc(typedarray);
+    await savePdfToIndexedDB(arrayBuffer, file.name);
   };
   fileReader.readAsArrayBuffer(file);
 }
@@ -408,6 +1118,10 @@ function setupPageObserver() {
         renderPage(pageNum);
       } else {
         // Page left screen - clean up memory
+        if (selectedPagesList && selectedPagesList.includes(pageNum)) {
+          console.log(`[StudyBuddy] Retaining page ${pageNum} from unrendering because it is currently selected.`);
+          return;
+        }
         unrenderPage(pageNum);
       }
     });
@@ -509,6 +1223,7 @@ async function renderPage(pageNum) {
       textDivs: []
     });
     await textLayerTask.promise;
+    cleanRenderedTextLayer(pageContainer, textLayerDiv);
     
     // 3. Create Highlight Overlay Layer & Render existing highlights
     const highlightLayer = document.createElement('div');
@@ -653,6 +1368,7 @@ function jumpToPage(pageNum) {
     pageContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
     currentPageNum = pageNum;
     document.getElementById('page-number-input').value = pageNum;
+    saveSessionToCloud();
   }
 }
 
@@ -676,8 +1392,8 @@ function renderHighlightsOnPage(pageNum, overlayLayer) {
   });
   
   // Render temporary selection highlight
-  if (temporaryHighlight && temporaryHighlight.pageNum === pageNum) {
-    temporaryHighlight.rects.forEach(r => {
+  if (temporaryHighlight && temporaryHighlight[pageNum]) {
+    temporaryHighlight[pageNum].forEach(r => {
       const span = document.createElement('div');
       span.className = `highlight-span temporary`;
       span.style.left = `${r.left * pdfScale}px`;
@@ -699,7 +1415,7 @@ function initFloatingToolbar() {
   
   let cachedSelectionRange = null;
   
-  // Selection change monitor
+  // Selection change monitor (real-time visual feedback, does not show toolbar)
   document.addEventListener('selectionchange', throttle(() => {
     // Typing guard: If the user is currently typing in the input box, do NOT hide or reposition the toolbar!
     if (document.activeElement === input) {
@@ -720,21 +1436,8 @@ function initFloatingToolbar() {
       return;
     }
     
-    // Check if selection is located inside any active textLayer node
-    let node = selection.anchorNode;
-    let isInsidePdf = false;
-    let pageNum = 1;
-    
-    while (node) {
-      if (node.classList && node.classList.contains('pdf-page-container')) {
-        isInsidePdf = true;
-        pageNum = parseInt(node.getAttribute('data-page'));
-        break;
-      }
-      node = node.parentNode;
-    }
-    
-    if (!isInsidePdf) {
+    const processed = processPdfSelection(selection);
+    if (!processed) {
       const resultSec = document.getElementById('toolbar-result-section');
       if (resultSec && resultSec.style.display === 'none') {
         clearTemporaryHighlight();
@@ -745,25 +1448,73 @@ function initFloatingToolbar() {
     }
     
     cachedSelectionRange = selection.getRangeAt(0).cloneRange();
-    selectedText = selectionStr;
-    selectedTextPageNum = pageNum;
+    selectedText = processed.selectedText;
+    selectedTextPageNum = processed.firstPageNum;
+    selectionHighlightsMap = processed.highlightsMap;
+    selectedPagesList = processed.pagesList;
     
     // Render the temporary visual highlight overlay
-    updateTemporaryHighlight(selection, pageNum);
-    
-    // Position toolbar above bounds (only if not already showing expanded results)
-    const resultSec = document.getElementById('toolbar-result-section');
-    if (resultSec && resultSec.style.display === 'none') {
-      try {
-        const rect = cachedSelectionRange.getBoundingClientRect();
-        positionToolbar(rect);
-      } catch (e) {}
+    updateTemporaryHighlight(processed.highlightsMap);
+  }, 100));
+  
+  const handleSelectionEnd = (e) => {
+    if (document.activeElement === input) {
+      return;
     }
-  }, 150));
+    // Ignore click events originating inside the toolbar to prevent interference
+    if (e && e.target && toolbar.contains(e.target)) {
+      return;
+    }
+    
+    setTimeout(() => {
+      const selection = window.getSelection();
+      const selectionStr = selection.toString().trim();
+      
+      if (!selectionStr || !selectedText) {
+        const resultSec = document.getElementById('toolbar-result-section');
+        if (resultSec && resultSec.style.display === 'none') {
+          clearTemporaryHighlight();
+          toolbar.style.display = 'none';
+          collapseToolbarResult();
+        }
+        return;
+      }
+      
+      // Check if selection is inside PDF
+      let node = selection.anchorNode;
+      let isInsidePdf = false;
+      while (node) {
+        if (node.classList && node.classList.contains('pdf-page-container')) {
+          isInsidePdf = true;
+          break;
+        }
+        node = node.parentNode;
+      }
+      
+      if (!isInsidePdf) {
+        return;
+      }
+      
+      // Position and show toolbar
+      const resultSec = document.getElementById('toolbar-result-section');
+      if (resultSec && resultSec.style.display === 'none') {
+        try {
+          if (selection.rangeCount > 0) {
+            cachedSelectionRange = selection.getRangeAt(0).cloneRange();
+            const rect = cachedSelectionRange.getBoundingClientRect();
+            positionToolbar(rect);
+          }
+        } catch (err) {}
+      }
+    }, 150);
+  };
+  
+  document.addEventListener('mouseup', handleSelectionEnd);
+  document.addEventListener('keyup', handleSelectionEnd);
   
   function positionToolbar(selectionRect) {
-    const toolbarWidth = 280; // Compact width for the dropdown toolbar
-    const toolbarHeight = 82;
+    const toolbarWidth = 390; // Expanded width for highlights & format actions
+    const toolbarHeight = 110;
     
     let left = selectionRect.left + (selectionRect.width / 2) - (toolbarWidth / 2);
     let top = selectionRect.top - toolbarHeight - 10;
@@ -783,28 +1534,11 @@ function initFloatingToolbar() {
   
   // Intercept mousedown on tooltip so click doesn't deselect text
   toolbar.addEventListener('mousedown', (e) => {
-    // DO NOT prevent default if clicking the input text box, inside the dropdown, or inside the result panel text
-    if (e.target.id === 'toolbar-cmd-input' || e.target.tagName === 'INPUT' || e.target.closest('#toolbar-actions-dropdown') || e.target.closest('#toolbar-result-section')) {
+    // DO NOT prevent default if clicking the input text box, the scroll actions container, or inside the result panel text
+    if (e.target.id === 'toolbar-cmd-input' || e.target.tagName === 'INPUT' || e.target.closest('.toolbar-scroll-actions') || e.target.closest('#toolbar-result-section')) {
       return; 
     }
     e.preventDefault();
-  });
-  
-  // Dropdown open/close toggle
-  const dropdownTrigger = document.getElementById('btn-dropdown-trigger');
-  const dropdownMenu = document.getElementById('dropdown-menu-list');
-  
-  dropdownTrigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const isShowing = dropdownMenu.style.display === 'flex';
-    dropdownMenu.style.display = isShowing ? 'none' : 'flex';
-  });
-  
-  // Close dropdown on click outside
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('#toolbar-actions-dropdown')) {
-      dropdownMenu.style.display = 'none';
-    }
   });
   
   // Action Handlers: Highlights
@@ -815,48 +1549,77 @@ function initFloatingToolbar() {
       clearTemporaryHighlight();
       toolbar.style.display = 'none';
       collapseToolbarResult();
-      dropdownMenu.style.display = 'none';
     });
   });
   
-  // Dropdown Action Handlers: Add to Notes
+  // Action Handlers: Format Bold
+  document.getElementById('btn-format-bold').addEventListener('click', () => {
+    appendToLocalFile(`**${selectedText}**`, selectedTextPageNum);
+    clearTemporaryHighlight();
+    window.getSelection().removeAllRanges();
+    toolbar.style.display = 'none';
+    collapseToolbarResult();
+  });
+  
+  // Action Handlers: Format Italic
+  document.getElementById('btn-format-italic').addEventListener('click', () => {
+    appendToLocalFile(`*${selectedText}*`, selectedTextPageNum);
+    clearTemporaryHighlight();
+    window.getSelection().removeAllRanges();
+    toolbar.style.display = 'none';
+    collapseToolbarResult();
+  });
+  
+  // Action Handlers: Format Heading
+  document.getElementById('btn-format-heading').addEventListener('click', () => {
+    appendToLocalFile(`### ${selectedText}`, selectedTextPageNum);
+    clearTemporaryHighlight();
+    window.getSelection().removeAllRanges();
+    toolbar.style.display = 'none';
+    collapseToolbarResult();
+  });
+  
+  // Action Handlers: Format Plain Paragraph
+  document.getElementById('btn-format-plain').addEventListener('click', () => {
+    appendToLocalFile(selectedText, selectedTextPageNum);
+    clearTemporaryHighlight();
+    window.getSelection().removeAllRanges();
+    toolbar.style.display = 'none';
+    collapseToolbarResult();
+  });
+  
+  // Action Handlers: Add to Notes
   document.getElementById('dropdown-action-note').addEventListener('click', () => {
     appendToLocalFile(selectedText, selectedTextPageNum);
     clearTemporaryHighlight();
     window.getSelection().removeAllRanges();
     toolbar.style.display = 'none';
     collapseToolbarResult();
-    dropdownMenu.style.display = 'none';
   });
   
-  // Dropdown Action Handlers: Copy Selection as Image
+  // Action Handlers: Copy Selection as Image
   document.getElementById('dropdown-action-image').addEventListener('click', () => {
     copySelectedAreaAsImage();
-    dropdownMenu.style.display = 'none';
   });
   
-  // Dropdown Action Handlers: AI Quick Summarize
+  // Action Handlers: AI Quick Summarize
   document.getElementById('dropdown-action-summarize').addEventListener('click', () => {
     runInlineAICommand(`/summarize`, selectedText);
-    dropdownMenu.style.display = 'none';
   });
   
-  // Dropdown Action Handlers: AI Key Takeaways
+  // Action Handlers: AI Key Takeaways
   document.getElementById('dropdown-action-keypoints').addEventListener('click', () => {
     runInlineAICommand(`/keypoints`, selectedText);
-    dropdownMenu.style.display = 'none';
   });
   
-  // Dropdown Action Handlers: AI Explain Concept
+  // Action Handlers: AI Explain Concept
   document.getElementById('dropdown-action-explain').addEventListener('click', () => {
     runInlineAICommand(`/explain`, selectedText);
-    dropdownMenu.style.display = 'none';
   });
   
-  // Dropdown Action Handlers: AI Make Flashcards
+  // Action Handlers: AI Make Flashcards
   document.getElementById('dropdown-action-flashcard').addEventListener('click', () => {
     runInlineAICommand(`/flashcard`, selectedText);
-    dropdownMenu.style.display = 'none';
   });
   
   // Action Handlers: Command input triggers
@@ -887,10 +1650,15 @@ function initFloatingToolbar() {
   });
   
   document.getElementById('btn-result-add-note').addEventListener('click', () => {
-    const content = document.getElementById('toolbar-result-content').innerText;
-    if (content) {
-      appendToLocalFile(content, selectedTextPageNum);
+    if (activeAiResponse) {
+      appendToLocalFile(activeAiResponse, selectedTextPageNum);
       addSystemChatMessage("Summary appended directly to notes workspace.", "success");
+      
+      // Switch to notes Preview mode so they see it formatted!
+      const previewBtn = document.getElementById('editor-btn-preview');
+      if (previewBtn) {
+        previewBtn.click();
+      }
     }
   });
   
@@ -1032,11 +1800,11 @@ async function runInlineAICommand(command, targetText) {
   
   switch (cleanCmd) {
     case '/summarize':
-      systemPrompt = `Summarize the following text concisely in a single paragraph. Do not use bullet points or lists:\n\n${targetText}`;
+      systemPrompt = `Write a concise direct summary of the following text, capturing the most important points and facts. Do not write meta-commentary (do NOT say 'this text explains', 'the author describes', etc.); write the summary directly as a condensed version of the content. Keep it in a single paragraph without bullet points or lists:\n\n${targetText}`;
       fallbackMessage = generateMockSummary(targetText);
       break;
     case '/keypoints':
-      systemPrompt = `Analyze the following text and extract the key definitions, concepts, and takeaways as a bulleted list:\n\n${targetText}`;
+      systemPrompt = `Extract the main key points and key definitions from the following text as a clear, high-impact bulleted summary. Capture the core facts directly without conversational preambles or meta-commentary:\n\n${targetText}`;
       fallbackMessage = generateMockKeypoints(targetText);
       break;
     case '/explain':
@@ -1064,6 +1832,8 @@ async function runInlineAICommand(command, targetText) {
       await new Promise(r => setTimeout(r, 1200));
       resultText = fallbackMessage;
     }
+    
+    activeAiResponse = resultText;
     
     // Command-specific action logic
     if (cleanCmd === '/flashcard') {
@@ -1104,106 +1874,40 @@ async function runInlineAICommand(command, targetText) {
 }
 
 function applyHighlight(color) {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return;
+  if (!selectionHighlightsMap || Object.keys(selectionHighlightsMap).length === 0) return;
   
-  const range = selection.getRangeAt(0);
-  const pageContainer = document.getElementById(`page-container-${selectedTextPageNum}`);
-  if (!pageContainer) return;
-  
-  const textLayer = pageContainer.querySelector('.textLayer');
-  if (!textLayer) return;
-  
-  const spans = textLayer.querySelectorAll('span');
-  const pageRect = pageContainer.getBoundingClientRect();
-  const scale = pdfScale;
-  const relativeRects = [];
-  
-  spans.forEach(span => {
-    if (selection.containsNode(span, true)) {
-      // Find the intersection range
-      const spanRange = document.createRange();
-      spanRange.selectNodeContents(span);
-      
-      let startNode = range.startContainer;
-      let startOffset = range.startOffset;
-      let endNode = range.endContainer;
-      let endOffset = range.endOffset;
-      
-      // If the selection starts inside this span, adjust start
-      if (span.contains(startNode) || span === startNode) {
-        if (startNode.nodeType === Node.TEXT_NODE) {
-          spanRange.setStart(startNode, startOffset);
-        } else {
-          spanRange.setStart(span, 0);
-        }
-      }
-      
-      // If the selection ends inside this span, adjust end
-      if (span.contains(endNode) || span === endNode) {
-        if (endNode.nodeType === Node.TEXT_NODE) {
-          spanRange.setEnd(endNode, endOffset);
-        } else {
-          spanRange.setEnd(span, span.childNodes.length);
-        }
-      }
-      
-      const rects = spanRange.getClientRects();
-      for (const r of rects) {
-        // Collect only valid, non-collapsed rects
-        if (r.width > 0 && r.height > 0) {
-          relativeRects.push({
-            left: (r.left - pageRect.left) / scale,
-            top: (r.top - pageRect.top) / scale,
-            width: r.width / scale,
-            height: r.height / scale
-          });
-        }
+  Object.keys(selectionHighlightsMap).forEach(pNumStr => {
+    const pNum = parseInt(pNumStr);
+    const rects = selectionHighlightsMap[pNum];
+    if (rects.length === 0) return;
+    
+    if (!highlights[pNum]) {
+      highlights[pNum] = [];
+    }
+    
+    highlights[pNum].push({
+      text: selectedText,
+      color: color,
+      rects: rects
+    });
+    
+    // Force redraw highlight layer for this page
+    const pageContainer = document.getElementById(`page-container-${pNum}`);
+    if (pageContainer) {
+      const layer = pageContainer.querySelector('.highlight-overlay-layer');
+      if (layer) {
+        renderHighlightsOnPage(pNum, layer);
       }
     }
-  });
-  
-  // Fallback in case span intersection didn't find anything
-  if (relativeRects.length === 0) {
-    const clientRects = range.getClientRects();
-    for (const r of clientRects) {
-      if (r.width > 0 && r.height > 0 && r.height < 60) { // filter out overly tall container boxes
-        relativeRects.push({
-          left: (r.left - pageRect.left) / scale,
-          top: (r.top - pageRect.top) / scale,
-          width: r.width / scale,
-          height: r.height / scale
-        });
-      }
-    }
-  }
-  
-  if (relativeRects.length === 0) return;
-  
-  // Init page structure if empty
-  if (!highlights[selectedTextPageNum]) {
-    highlights[selectedTextPageNum] = [];
-  }
-  
-  // Save highlight
-  highlights[selectedTextPageNum].push({
-    text: selectedText,
-    color: color,
-    rects: relativeRects
   });
   
   // Persist highlights
   localStorage.setItem('study_highlights', JSON.stringify(highlights));
   saveSessionToCloud();
   
-  // Force redraw highlight layer
-  const layer = pageContainer.querySelector('.highlight-overlay-layer');
-  if (layer) {
-    renderHighlightsOnPage(selectedTextPageNum, layer);
-  }
-  
   // Clean window selection visual overlays
-  selection.removeAllRanges();
+  window.getSelection().removeAllRanges();
+  clearTemporaryHighlight();
 }
 
 // ==========================================================================
@@ -1215,6 +1919,30 @@ function initNotesEditor() {
   const notesTextarea = document.getElementById('notes-textarea');
   const exportBtn = document.getElementById('btn-export-txt');
   const clearBtn = document.getElementById('editor-btn-clear');
+  
+  const writeBtn = document.getElementById('editor-btn-write');
+  const previewBtn = document.getElementById('editor-btn-preview');
+  const previewDiv = document.getElementById('notes-preview');
+  
+  if (writeBtn && previewBtn && previewDiv) {
+    writeBtn.addEventListener('click', () => {
+      writeBtn.classList.add('active');
+      previewBtn.classList.remove('active');
+      notesTextarea.style.display = '';
+      previewDiv.style.display = 'none';
+      notesTextarea.focus();
+    });
+    
+    previewBtn.addEventListener('click', () => {
+      previewBtn.classList.add('active');
+      writeBtn.classList.remove('active');
+      notesTextarea.style.display = 'none';
+      previewDiv.style.display = '';
+      
+      const text = notesTextarea.value;
+      previewDiv.innerHTML = convertMarkdownToHtml(text) || '<p style="color:var(--text-muted); font-style:italic;">No notes written yet...</p>';
+    });
+  }
   
   // Load saved notes backup on load
   const backup = localStorage.getItem('study_notes');
@@ -1707,11 +2435,11 @@ async function runAICommand(command, targetText) {
   
   switch (cleanCmd) {
     case '/summarize':
-      systemPrompt = `Summarize the following text concisely in a single paragraph. Do not use bullet points or lists:\n\n${targetText}`;
+      systemPrompt = `Write a concise direct summary of the following text, capturing the most important points and facts. Do not write meta-commentary (do NOT say 'this text explains', 'the author describes', etc.); write the summary directly as a condensed version of the content. Keep it in a single paragraph without bullet points or lists:\n\n${targetText}`;
       fallbackMessage = generateMockSummary(targetText);
       break;
     case '/keypoints':
-      systemPrompt = `Analyze the following text and extract the key definitions, concepts, and takeaways as a bulleted list:\n\n${targetText}`;
+      systemPrompt = `Extract the main key points and key definitions from the following text as a clear, high-impact bulleted summary. Capture the core facts directly without conversational preambles or meta-commentary:\n\n${targetText}`;
       fallbackMessage = generateMockKeypoints(targetText);
       break;
     case '/explain':
@@ -1911,20 +2639,24 @@ function extractKeywords(text) {
 }
 
 function generateMockSummary(text) {
-  const keywords = extractKeywords(text);
-  const cleanText = text.substring(0, 120);
-  
-  return `This selection relates to ${keywords[0] || 'research'} and ${keywords[1] || 'methodology'}. It describes: "${cleanText}...". The main takeaway is that understanding these elements is essential for verifying theoretical frameworks and optimizing system parameters.`;
+  const sentences = text.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 20);
+  if (sentences.length > 0) {
+    // Return the first 2-3 sentences directly as the summary
+    return sentences.slice(0, Math.min(3, sentences.length)).join('. ') + '.';
+  }
+  return text.substring(0, 300) + '...';
 }
 
 function generateMockKeypoints(text) {
+  const sentences = text.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 15);
+  if (sentences.length > 0) {
+    const bulletPoints = sentences.slice(0, Math.min(4, sentences.length))
+      .map(s => `* **Key Point**: ${s}.`)
+      .join('\n');
+    return `### Key Takeaways\n${bulletPoints}`;
+  }
   const keywords = extractKeywords(text);
-  const cleanText = text.substring(0, 120);
-  
-  return `### Key Takeaways
-* **Core Context**: Focuses on *${keywords[0] || 'research'}* and *${keywords[1] || 'methodology'}*.
-* **Primary Insight**: The excerpt discusses: "${cleanText}..."
-* **Key Takeaway**: Understanding these elements is essential for verifying theoretical frameworks and validating systems.`;
+  return `### Key Takeaways\n* **Core Concept**: Focuses on ${keywords.join(', ')}.\n* **Main Point**: ${text.substring(0, 150)}...`;
 }
 
 function generateMockExplanation(text) {
@@ -2071,99 +2803,42 @@ function throttle(func, limit) {
 
 function clearTemporaryHighlight() {
   if (temporaryHighlight) {
-    const prevPageNum = temporaryHighlight.pageNum;
+    const pagesToRedraw = Object.keys(temporaryHighlight);
     temporaryHighlight = null;
-    const pageContainer = document.getElementById(`page-container-${prevPageNum}`);
+    pagesToRedraw.forEach(pNumStr => {
+      const pNum = parseInt(pNumStr);
+      const pageContainer = document.getElementById(`page-container-${pNum}`);
+      if (pageContainer) {
+        const layer = pageContainer.querySelector('.highlight-overlay-layer');
+        if (layer) {
+          renderHighlightsOnPage(pNum, layer);
+        }
+      }
+    });
+  }
+  selectedPagesList = [];
+  selectionHighlightsMap = {};
+  cleanUpOffscreenPages();
+}
+
+function updateTemporaryHighlight(highlightsMap) {
+  // Clear any existing temporary highlights
+  clearTemporaryHighlight();
+  
+  // Set the new temporary highlights
+  temporaryHighlight = highlightsMap;
+  
+  // Redraw highlights on all pages in the map
+  Object.keys(highlightsMap).forEach(pNumStr => {
+    const pNum = parseInt(pNumStr);
+    const pageContainer = document.getElementById(`page-container-${pNum}`);
     if (pageContainer) {
       const layer = pageContainer.querySelector('.highlight-overlay-layer');
       if (layer) {
-        renderHighlightsOnPage(prevPageNum, layer);
-      }
-    }
-  }
-}
-
-function updateTemporaryHighlight(selection, pageNum) {
-  if (temporaryHighlight && temporaryHighlight.pageNum !== pageNum) {
-    clearTemporaryHighlight();
-  }
-  
-  if (selection.rangeCount === 0) return;
-  const range = selection.getRangeAt(0);
-  const pageContainer = document.getElementById(`page-container-${pageNum}`);
-  if (!pageContainer) return;
-  
-  const textLayer = pageContainer.querySelector('.textLayer');
-  if (!textLayer) return;
-  
-  const spans = textLayer.querySelectorAll('span');
-  const pageRect = pageContainer.getBoundingClientRect();
-  const scale = pdfScale;
-  const relativeRects = [];
-  
-  spans.forEach(span => {
-    if (selection.containsNode(span, true)) {
-      const spanRange = document.createRange();
-      spanRange.selectNodeContents(span);
-      
-      let startNode = range.startContainer;
-      let startOffset = range.startOffset;
-      let endNode = range.endContainer;
-      let endOffset = range.endOffset;
-      
-      if (span.contains(startNode) || span === startNode) {
-        if (startNode.nodeType === Node.TEXT_NODE) {
-          spanRange.setStart(startNode, startOffset);
-        } else {
-          spanRange.setStart(span, 0);
-        }
-      }
-      
-      if (span.contains(endNode) || span === endNode) {
-        if (endNode.nodeType === Node.TEXT_NODE) {
-          spanRange.setEnd(endNode, endOffset);
-        } else {
-          spanRange.setEnd(span, span.childNodes.length);
-        }
-      }
-      
-      const rects = spanRange.getClientRects();
-      for (const r of rects) {
-        if (r.width > 0 && r.height > 0) {
-          relativeRects.push({
-            left: (r.left - pageRect.left) / scale,
-            top: (r.top - pageRect.top) / scale,
-            width: r.width / scale,
-            height: r.height / scale
-          });
-        }
+        renderHighlightsOnPage(pNum, layer);
       }
     }
   });
-  
-  if (relativeRects.length === 0) {
-    const clientRects = range.getClientRects();
-    for (const r of clientRects) {
-      if (r.width > 0 && r.height > 0 && r.height < 60) {
-        relativeRects.push({
-          left: (r.left - pageRect.left) / scale,
-          top: (r.top - pageRect.top) / scale,
-          width: r.width / scale,
-          height: r.height / scale
-        });
-      }
-    }
-  }
-  
-  temporaryHighlight = {
-    pageNum: pageNum,
-    rects: relativeRects
-  };
-  
-  const layer = pageContainer.querySelector('.highlight-overlay-layer');
-  if (layer) {
-    renderHighlightsOnPage(pageNum, layer);
-  }
 }
 
 function multiplyMatrices(m1, m2) {
@@ -2327,6 +3002,7 @@ function convertMarkdownToHtml(markdown) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%; border-radius:8px; margin:10px 0; box-shadow:0 4px 12px rgba(0,0,0,0.15); display:block;" />')
     .replace(/^# (.*$)/gim, '<h1>$1</h1>')
     .replace(/^## (.*$)/gim, '<h2>$1</h2>')
     .replace(/^### (.*$)/gim, '<h3>$1</h3>')
@@ -2380,7 +3056,14 @@ function debounce(func, delay) {
 
 // Debounced Cloud Session Save
 const saveSessionToCloud = debounce(async () => {
-  if (!currentUser) return;
+  // Always save locally first as a fallback/guest persistence
+  localStorage.setItem('study_page_num', currentPageNum);
+  localStorage.setItem('study_pdf_scale', pdfScale);
+
+  if (!currentUser) {
+    showSaveStatus("Saved locally");
+    return;
+  }
   
   try {
     const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');

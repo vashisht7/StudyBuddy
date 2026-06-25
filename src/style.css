@@ -957,19 +957,36 @@ input, button, textarea {
    ========================================================================== */
 .floating-toolbar {
   position: fixed;
-  background: rgba(18, 18, 24, 0.65); /* Apple-like translucent dark */
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.15); /* Clean, thin border */
-  border-radius: 14px; /* Rounded modern Apple UI look */
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  padding: 6px;
+  background: #1e293b; /* High-contrast solid dark slate */
+  border: 2px solid var(--accent-blue, #0071e3); /* Thick blue border for extreme visibility */
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   z-index: 1000;
-  width: 280px; /* Fixed width matching JavaScript calculations */
-  animation: popIn 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+  width: 390px; /* Expanded width to fit highlight & format actions */
+  animation: popIn 0.12s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.btn-format-note {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.btn-format-note:hover {
+  background-color: var(--bg-control-hover, rgba(255, 255, 255, 0.15));
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: scale(1.1);
 }
 
 @keyframes popIn {
@@ -1552,6 +1569,125 @@ input, button, textarea {
 
 .btn-google-login:hover {
   background-color: #f3f4f6 !important;
+}
+
+/* Capture Mode Cursor and selection styles */
+.pdf-scroll-container.capture-mode-active .pdf-page-container {
+  cursor: crosshair !important;
+  user-select: none !important;
+}
+
+.pdf-scroll-container.capture-mode-active .textLayer {
+  pointer-events: none !important; /* Disable text selection when cropping */
+}
+
+.capture-selection-box {
+  position: absolute;
+  border: 2px dashed var(--accent-blue, #0071e3);
+  background-color: rgba(0, 113, 227, 0.15);
+  box-shadow: 0 0 8px rgba(0, 113, 227, 0.3);
+  z-index: 1000;
+  pointer-events: none; /* Let mouse move events fall through to document */
+}
+
+.btn-capture-mode.active {
+  background-color: var(--accent-blue, #0071e3) !important;
+  color: white !important;
+  border-color: var(--accent-blue, #0071e3) !important;
+}
+
+/* Notes Preview and Editor Modes */
+.notes-preview {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  overflow-y: auto;
+  min-height: 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.notes-preview img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 12px 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  display: block;
+}
+
+.editor-modes {
+  display: flex;
+  gap: 4px;
+}
+
+.editor-modes .btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.editor-modes .btn.active {
+  background-color: var(--accent-blue, #0071e3) !important;
+  color: white !important;
+}
+
+/* Scrollable Quick Actions Row */
+.toolbar-scroll-actions {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 2px;
+  margin-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  /* Custom scrollbar styling for a clean premium look */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
+.toolbar-scroll-actions::-webkit-scrollbar {
+  height: 4px;
+}
+
+.toolbar-scroll-actions::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.toolbar-scroll-actions::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.scroll-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #e2e8f0; /* High contrast text */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap; /* Prevent text wrapping */
+  transition: var(--transition-smooth);
+  flex-shrink: 0; /* Keep size in scroll container */
+}
+
+.scroll-action-btn:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--accent-blue, #0071e3);
+  color: white;
+}
+
+.scroll-action-btn svg {
+  fill: currentColor;
+  flex-shrink: 0;
 }
 
 
