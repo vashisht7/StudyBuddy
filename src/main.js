@@ -220,14 +220,14 @@ function processPdfSelection(selection) {
         isNoise = true;
       }
       
-      if (!isNoise && relativeTopScaled < 70) {
+      if (!isNoise && relativeTopScaled < 45) {
         const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
         if (isAllCaps || trimmedLineText.length < 80 || /^\d+(\.\d+)*\s+[A-Z]/i.test(trimmedLineText) || /chapter/i.test(trimmedLineText)) {
           isNoise = true;
         }
       }
       
-      if (!isNoise && relativeBottomScaled < 70) {
+      if (!isNoise && relativeBottomScaled < 45) {
         const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
         if (isAllCaps || trimmedLineText.length < 80 || /chapter/i.test(trimmedLineText)) {
           isNoise = true;
@@ -389,7 +389,7 @@ function cleanRenderedTextLayer(pageContainer, textLayerDiv) {
     }
     
     // 2. Running headers (top zone)
-    if (!isNoise && relativeTopScaled < 70) {
+    if (!isNoise && relativeTopScaled < 45) {
       const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
       if (isAllCaps || trimmedLineText.length < 80 || /^\d+(\.\d+)*\s+[A-Z]/i.test(trimmedLineText) || /chapter/i.test(trimmedLineText)) {
         isNoise = true;
@@ -397,7 +397,7 @@ function cleanRenderedTextLayer(pageContainer, textLayerDiv) {
     }
     
     // 3. Running footers (bottom zone)
-    if (!isNoise && relativeBottomScaled < 70) {
+    if (!isNoise && relativeBottomScaled < 45) {
       const isAllCaps = trimmedLineText === trimmedLineText.toUpperCase() && /[A-Z]/.test(trimmedLineText);
       if (isAllCaps || trimmedLineText.length < 80 || /chapter/i.test(trimmedLineText)) {
         isNoise = true;
@@ -2801,7 +2801,7 @@ function throttle(func, limit) {
 // Temporary Selection Highlight & Image Selection Extraction Helpers
 // ==========================================================================
 
-function clearTemporaryHighlight() {
+function clearTemporaryHighlight(clearSelectionState = true) {
   if (temporaryHighlight) {
     const pagesToRedraw = Object.keys(temporaryHighlight);
     temporaryHighlight = null;
@@ -2816,14 +2816,16 @@ function clearTemporaryHighlight() {
       }
     });
   }
-  selectedPagesList = [];
-  selectionHighlightsMap = {};
-  cleanUpOffscreenPages();
+  if (clearSelectionState) {
+    selectedPagesList = [];
+    selectionHighlightsMap = {};
+    cleanUpOffscreenPages();
+  }
 }
 
 function updateTemporaryHighlight(highlightsMap) {
-  // Clear any existing temporary highlights
-  clearTemporaryHighlight();
+  // Clear any existing temporary highlights but retain selection coordinates state
+  clearTemporaryHighlight(false);
   
   // Set the new temporary highlights
   temporaryHighlight = highlightsMap;
