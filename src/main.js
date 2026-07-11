@@ -1,15 +1,19 @@
 import './style.css';
-import { 
-  auth, 
-  db, 
-  signInAnonymously, 
-  GoogleAuthProvider, 
-  signInWithPopup, 
-  signOut, 
+import {
+  auth,
+  db,
+  storage,
+  signInAnonymously,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
   onAuthStateChanged,
   doc,
   setDoc,
-  getDoc
+  getDoc,
+  ref,
+  uploadBytes,
+  getDownloadURL
 } from './firebase.js';
 
 // PDF.js global setup
@@ -37,6 +41,8 @@ let highlights = JSON.parse(localStorage.getItem('study_highlights') || '{}');
 let temporaryHighlight = null;
 let pdfPageImages = {};
 let currentUser = null;
+let lastKnownUid = null;
+let sessionAuthInitialized = false;
 let activeAiResponse = '';
 
 function cleanPdfText(text) {
@@ -505,12 +511,18 @@ function openDB() {
   });
 }
 
+// Each signed-in account gets its own IndexedDB key so switching accounts
+// in the same browser never shows another account's cached PDF.
+function activePdfKey() {
+  return currentUser ? `active_pdf_${currentUser.uid}` : 'active_pdf_guest';
+}
+
 async function savePdfToIndexedDB(arrayBuffer, fileName) {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
-    store.put({ arrayBuffer, fileName }, 'active_pdf');
+    store.put({ arrayBuffer, fileName }, activePdfKey());
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
@@ -525,7 +537,7 @@ async function getPdfFromIndexedDB() {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME, 'readonly');
     const store = tx.objectStore(STORE_NAME);
-    const request = store.get('active_pdf');
+    const request = store.get(activePdfKey());
     return new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -544,14 +556,64 @@ async function restorePersistedPdf() {
       document.getElementById('welcome-screen').style.display = 'none';
       const scrollContainer = document.getElementById('pdf-scroll-container');
       scrollContainer.style.display = 'flex';
-      
+
       addSystemChatMessage(`Restoring saved document: <strong>${saved.fileName}</strong>...`, "primary");
-      
+
       const typedarray = new Uint8Array(saved.arrayBuffer);
       await loadPdfDoc(typedarray);
+      return true;
     }
   } catch (err) {
     console.error("Failed to restore PDF from IndexedDB", err);
+  }
+  return false;
+}
+
+// Uploads the active PDF to this account's private Storage folder and
+// records its location on the Firestore session doc so it follows the
+// account across devices/browsers.
+async function uploadPdfToCloud(arrayBuffer, fileName) {
+  if (!currentUser) return;
+  try {
+    const storagePath = `users/${currentUser.uid}/pdfs/${fileName}`;
+    await uploadBytes(ref(storage, storagePath), arrayBuffer);
+
+    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
+    await setDoc(sessionDocRef, {
+      pdfFileName: fileName,
+      pdfStoragePath: storagePath,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (err) {
+    console.error('Failed to upload PDF to cloud', err);
+    addSystemChatMessage("Could not sync this PDF to your account's cloud storage.", "warning");
+  }
+}
+
+// Loads the signed-in account's own PDF from Storage (if any). Returns
+// true if a document was restored, false otherwise.
+async function loadUserPdfFromCloud() {
+  if (!currentUser) return false;
+  try {
+    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
+    const docSnap = await getDoc(sessionDocRef);
+    if (!docSnap.exists() || !docSnap.data().pdfStoragePath) return false;
+
+    const { pdfStoragePath, pdfFileName } = docSnap.data();
+    const url = await getDownloadURL(ref(storage, pdfStoragePath));
+    const res = await fetch(url);
+    const arrayBuffer = await res.arrayBuffer();
+
+    document.getElementById('welcome-screen').style.display = 'none';
+    document.getElementById('pdf-scroll-container').style.display = 'flex';
+    addSystemChatMessage(`Restoring your document: <strong>${pdfFileName}</strong>...`, "primary");
+
+    await loadPdfDoc(new Uint8Array(arrayBuffer));
+    await savePdfToIndexedDB(arrayBuffer, pdfFileName);
+    return true;
+  } catch (err) {
+    console.error("Failed to load this account's PDF from cloud", err);
+    return false;
   }
 }
 
@@ -779,10 +841,11 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Try loading API status
   updateApiStatusDisplay();
-  
-  // Restore PDF from IndexedDB if it exists
-  restorePersistedPdf();
-  
+
+  // PDF restoration is handled per-account once Firebase Auth resolves
+  // (see onAuthStateChanged in initFirebaseAuth), so each account only
+  // ever sees its own document.
+
   // Initialize Firebase Auth
   initFirebaseAuth();
 });
@@ -1054,6 +1117,7 @@ function initUploads() {
         const typedarray = new Uint8Array(arrayBuffer);
         loadPdfDoc(typedarray);
         await savePdfToIndexedDB(arrayBuffer, 'sample.pdf');
+        await uploadPdfToCloud(arrayBuffer, 'sample.pdf');
       })
       .catch(err => {
         console.error("Failed to load sample", err);
@@ -1077,6 +1141,7 @@ function loadLocalPdfFile(file) {
     const typedarray = new Uint8Array(arrayBuffer);
     loadPdfDoc(typedarray);
     await savePdfToIndexedDB(arrayBuffer, file.name);
+    await uploadPdfToCloud(arrayBuffer, file.name);
   };
   fileReader.readAsArrayBuffer(file);
 }
@@ -3303,8 +3368,18 @@ function initFirebaseAuth() {
   // Listen to Auth State Changes
   onAuthStateChanged(auth, async (user) => {
     if (user) {
+      // If we already had a different account loaded in this browser tab
+      // (e.g. guest -> Google account A -> Google account B), wipe the
+      // in-memory/local state first so the new account never inherits the
+      // previous account's notes, highlights, flashcards, or PDF.
+      const uidChanged = sessionAuthInitialized && lastKnownUid !== user.uid;
+      if (uidChanged) {
+        resetSessionState();
+      }
+      sessionAuthInitialized = true;
+      lastKnownUid = user.uid;
       currentUser = user;
-      
+
       const isAnonymous = user.isAnonymous;
       if (isAnonymous) {
         if (statusIcon) statusIcon.textContent = "👤";
@@ -3342,8 +3417,17 @@ function initFirebaseAuth() {
       }
 
       await loadSessionFromCloud();
-      
+
+      // Restore this account's own PDF: try its cloud copy first (so it
+      // follows the account across devices/browsers), falling back to this
+      // browser's local cache for the same account if cloud lookup fails.
+      const hasCloudPdf = await loadUserPdfFromCloud();
+      if (!hasCloudPdf) {
+        await restorePersistedPdf();
+      }
+
     } else {
+      lastKnownUid = null;
       currentUser = null;
       try {
         await signInAnonymously(auth);
@@ -3353,4 +3437,43 @@ function initFirebaseAuth() {
       }
     }
   });
+}
+
+// Wipes local/in-memory study state when switching to a different account
+// within the same browser tab, so the new account starts from a clean
+// slate instead of inheriting the previous account's data.
+function resetSessionState() {
+  highlights = {};
+  flashcards = [];
+  currentPageNum = 1;
+  pdfScale = 1.2;
+
+  localStorage.removeItem('study_highlights');
+  localStorage.removeItem('study_notes');
+  localStorage.removeItem('study_flashcards');
+  localStorage.removeItem('study_page_num');
+  localStorage.removeItem('study_pdf_scale');
+
+  const notesTextarea = document.getElementById('notes-textarea');
+  if (notesTextarea) notesTextarea.value = '';
+  updateFlashcardsUI();
+
+  // Unload the current PDF and return to the welcome screen.
+  if (pageObserver) {
+    pageObserver.disconnect();
+  }
+  pdfDoc = null;
+  pdfPagesCount = 0;
+  isRenderingPage = {};
+  pageRenderTasks = {};
+  pdfPageImages = {};
+
+  const viewerContent = document.getElementById('pdf-viewer-content');
+  if (viewerContent) viewerContent.innerHTML = '';
+
+  const scrollContainer = document.getElementById('pdf-scroll-container');
+  if (scrollContainer) scrollContainer.style.display = 'none';
+
+  const welcomeScreen = document.getElementById('welcome-screen');
+  if (welcomeScreen) welcomeScreen.style.display = 'flex';
 }
