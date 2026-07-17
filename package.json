@@ -1,17 +1,106 @@
 {
   "name": "studybuddy",
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "A local-first PDF reading, notes, and multimodal AI study workspace for macOS.",
+  "author": "Vashisht Devasani",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "dev:web": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "build:web": "vite build",
+    "preview": "vite preview",
+    "preview:web": "vite preview",
+    "setup:local-ai": "bash scripts/setup-local-ai.sh",
+    "build:speech": "bash scripts/build-speech-helper.sh",
+    "build:mac": "npm run build && npm run build:speech && electron-builder --mac",
+    "build:mac:dir": "npm run build && npm run build:speech && electron-builder --mac dir",
+    "build:offline-lite": "bash scripts/build-offline-dmg.sh gemma3:4b",
+    "release:both": "bash scripts/release-both.sh"
   },
   "devDependencies": {
+    "electron": "^37.10.3",
+    "electron-builder": "^25.1.8",
     "vite": "^5.4.11"
   },
   "dependencies": {
-    "firebase": "^12.14.0"
+    "firebase": "^12.14.0",
+    "katex": "^0.16.47",
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^3.11.174"
+  },
+  "build": {
+    "appId": "com.vashisht.studybuddy",
+    "productName": "StudyBuddy",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts/setup-local-ai.sh",
+        "to": "tools/setup-local-ai.sh"
+      },
+      {
+        "from": "build/native/StudyBuddySpeech",
+        "to": "bin/StudyBuddySpeech"
+      },
+      {
+        "from": "MAC_INSTALL_GUIDE.md",
+        "to": "docs/MAC_INSTALL_GUIDE.md"
+      },
+      {
+        "from": "APP_WORKFLOW_REPORT.md",
+        "to": "docs/APP_WORKFLOW_REPORT.md"
+      },
+      {
+        "from": "CODE_GUIDE.md",
+        "to": "docs/CODE_GUIDE.md"
+      },
+      {
+        "from": "NEXT_FEATURES.md",
+        "to": "docs/NEXT_FEATURES.md"
+      }
+    ],
+    "mac": {
+      "icon": "build/StudyBuddy.icns",
+      "category": "public.app-category.education",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "StudyBuddy uses the microphone only while you dictate your own thoughts into Study Notes.",
+        "NSSpeechRecognitionUsageDescription": "StudyBuddy converts your spoken thoughts into Study Notes using Apple on-device speech recognition."
+      },
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "title": "StudyBuddy ${version}",
+      "backgroundColor": "#0b0b0c",
+      "iconSize": 112,
+      "window": {
+        "width": 620,
+        "height": 420
+      },
+      "contents": [
+        {
+          "x": 170,
+          "y": 205,
+          "type": "file"
+        },
+        {
+          "x": 450,
+          "y": 205,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
   }
 }

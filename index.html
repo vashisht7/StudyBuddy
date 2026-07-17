@@ -2,20 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/app-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     
     <!-- SEO & Page Information -->
-    <title>Study — Interactive PDF Reader & AI Companion</title>
-    <meta name="description" content="Read PDFs, highlight text, ask AI questions, generate flashcards, and save notes directly to your local file system." />
+    <title>StudyBuddy — Local-first Reading Workspace</title>
+    <meta name="description" content="Read and edit documents, ask Buddy grounded questions, and keep polished notes locally." />
     
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
-    <!-- PDF.js Stylesheets -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf_viewer.min.css">
   </head>
   <body>
     <div id="app" class="app-container">
@@ -23,28 +16,25 @@
       <!-- Top Navigation & Controls Bar -->
       <header class="app-header">
         <div class="header-left">
-          <div class="logo-area">
-            <svg class="logo-icon" viewBox="0 0 24 24" width="24" height="24">
-              <path d="M12 3L1 9L12 15L21 10.09V17H23V9L12 3Z" />
-              <path d="M21 11.5L12 16.5L3 11.5V17.5L12 22.5L21 17.5V11.5Z" />
-            </svg>
-            <span class="logo-text">Study</span>
-          </div>
+          <button class="logo-area" id="btn-home" title="Back to library" aria-label="Back to library">
+            <img class="logo-icon" src="/app-icon.png" alt="" width="24" height="24" />
+            <span class="logo-text">StudyBuddy</span>
+          </button>
           
           <!-- File Upload -->
-          <label for="pdf-upload" class="btn btn-primary btn-upload" id="upload-label">
+          <label for="pdf-upload" class="btn btn-primary btn-upload" id="upload-label" hidden>
             <svg viewBox="0 0 24 24" width="16" height="16">
               <path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/>
             </svg>
-            <span>Open PDF</span>
-            <input type="file" id="pdf-upload" accept="application/pdf" style="display: none;" />
+            <span>Add document</span>
+            <input type="file" id="pdf-upload" accept=".pdf,.docx,.txt,.md,.markdown,.rtf,.csv,.json,.js,.jsx,.ts,.tsx,.html,.css,.py,.java,.c,.cpp,.h,.hpp,.swift,.go,.rs,.sh,.yaml,.yml,.xml,.toml,.ini,.log" style="display: none;" />
           </label>
           
           <button id="btn-capture-mode" class="btn btn-secondary btn-capture-mode" title="Capture Area as Image">
             <svg viewBox="0 0 24 24" width="16" height="16" style="fill:currentColor;">
               <path d="M4 4h6v2H6v4H4V4zm14 0h-6v2h4v4h2V4zM4 20h6v-2H6v-4H4v6zm14 0h-6v-2h4v-4h2v6zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/>
             </svg>
-            <span>Capture Tool</span>
+            <span>Capture</span>
           </button>
         </div>
         
@@ -83,16 +73,14 @@
           <!-- Toggle Sidebar Button -->
           <button id="btn-toggle-sidebar" class="btn btn-secondary btn-toggle-sidebar" title="Toggle Workspace Panel">
             <svg viewBox="0 0 24 24" width="16" height="16" style="fill:currentColor;">
-              <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/>
-              <path d="M12 5h2v14h-2z"/>
+              <path d="M4 6.5h16v1.5H4zm0 4.75h16v1.5H4zM4 16h16v1.5H4z"/>
             </svg>
-            <span>Toggle Workspace</span>
           </button>
           
-          <!-- Firebase Auth Profile widget -->
-          <button id="btn-auth-profile" class="btn btn-secondary btn-auth" title="Cloud Sync Account">
+          <!-- Optional account identity; study data remains local -->
+          <button id="btn-auth-profile" class="btn btn-secondary btn-auth" title="Local Profile">
             <span id="auth-status-icon" class="auth-status-icon">👤</span>
-            <span id="auth-status-text-display">Guest Session</span>
+            <span id="auth-status-text-display">Guest</span>
           </button>
           
           <!-- Key Settings -->
@@ -100,48 +88,58 @@
             <svg viewBox="0 0 24 24" width="16" height="16">
               <path d="M12.97 2.54a1 1 0 0 0-1.94 0l-.69 2.76a8.88 8.88 0 0 0-1.89.78L6.2 4.4a1 1 0 0 0-1.37.49l-1.94 3.36a1 1 0 0 0 .23 1.25l2.12 1.62a9 9 0 0 0 0 2.06l-2.12 1.62a1 1 0 0 0-.23 1.25l1.94 3.36a1 1 0 0 0 1.37.49l2.25-1.68a8.88 8.88 0 0 0 1.89.78l.69 2.76a1 1 0 0 0 1.94 0l.69-2.76a8.88 8.88 0 0 0 1.89-.78l2.25 1.68a1 1 0 0 0 1.37-.49l1.94-3.36a1 1 0 0 0-.23-1.25l-2.12-1.62a9 9 0 0 0 0-2.06l2.12-1.62a1 1 0 0 0 .23-1.25l-1.94-3.36a1 1 0 0 0-1.37-.49l-2.25 1.68a8.88 8.88 0 0 0-1.89-.78l-.69-2.76zM12 15a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
             </svg>
-            <span>API Key</span>
           </button>
         </div>
       </header>
       
       <!-- Main Content Area with Split Pane -->
       <main class="main-layout">
+        <aside class="document-outline" id="document-outline" aria-label="Document navigation">
+          <div class="outline-header">
+            <div>
+              <span class="outline-kicker">DOCUMENT MAP</span>
+              <h2 id="outline-title">Contents</h2>
+            </div>
+            <button class="outline-collapse" id="btn-outline-collapse" title="Hide document map" aria-label="Hide document map">‹</button>
+          </div>
+          <div class="document-kind" id="document-kind">
+            <span class="kind-icon">◇</span>
+            <span><strong>Analyzing document</strong><small>Local intelligence</small></span>
+          </div>
+          <nav class="outline-list" id="outline-list"></nav>
+          <button class="outline-ai-button" id="btn-enhance-outline">
+            <span>✦</span> Refine map with AI
+          </button>
+        </aside>
+        <button class="outline-reveal" id="btn-outline-reveal" title="Show document map" aria-label="Show document map">☰</button>
         
         <!-- Left Side: PDF Reader Panel -->
         <section class="pdf-viewer-panel" id="pdf-viewer-panel">
           <!-- Welcome Screen (shown when no PDF is loaded) -->
           <div class="welcome-screen" id="welcome-screen">
-            <svg class="welcome-icon" viewBox="0 0 24 24" width="64" height="64">
-              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
-            </svg>
-            <h2>Welcome to Study</h2>
-            <p>Upload a PDF textbook, paper, or document to start your smart study session. You can highlight text, write persistent notes, and work with our built-in AI helper.</p>
-            <label for="pdf-upload-welcome" class="btn btn-primary btn-large">
-              <svg viewBox="0 0 24 24" width="20" height="20">
-                <path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/>
-              </svg>
-              Choose PDF File
-              <input type="file" id="pdf-upload-welcome" accept="application/pdf" style="display: none;" />
-            </label>
-            <button id="btn-load-sample" class="btn btn-secondary btn-large" style="margin-top: 12px; width: fit-content;">
-              <svg viewBox="0 0 24 24" width="20" height="20">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-              </svg>
-              Load Sample Document
-            </button>
-            <div class="welcome-features">
-              <div class="feature-card">
-                <h3>📝 Note-Taking</h3>
-                <p>Connect a real text file and automatically append notes directly to it.</p>
+            <div class="library-hero">
+              <div>
+                <span class="welcome-eyebrow">STUDYBUDDY WORKSPACE</span>
+                <h2>Your library</h2>
+                <p>Pick up where you left off, with every note and conversation kept beside its document.</p>
               </div>
-              <div class="feature-card">
-                <h3>🤖 AI Assistant</h3>
-                <p>Highlight text and type <code>/summarize</code> or <code>/explain</code> for instant help.</p>
+              <label for="pdf-upload-welcome" class="btn btn-primary library-add-button">
+                <svg viewBox="0 0 24 24" width="17" height="17"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+                Add document
+                <input type="file" id="pdf-upload-welcome" accept=".pdf,.docx,.txt,.md,.markdown,.rtf,.csv,.json,.js,.jsx,.ts,.tsx,.html,.css,.py,.java,.c,.cpp,.h,.hpp,.swift,.go,.rs,.sh,.yaml,.yml,.xml,.toml,.ini,.log" multiple style="display: none;" />
+              </label>
+            </div>
+            <div class="library-grid" id="library-grid"></div>
+            <div class="library-empty" id="library-empty">
+              <div class="empty-visual">
+                <span class="empty-sheet sheet-back"></span>
+                <span class="empty-sheet sheet-front"></span>
               </div>
-              <div class="feature-card">
-                <h3>📇 Flashcards</h3>
-                <p>Generate study decks from text selections and quiz yourself.</p>
+              <h3>Build your study library</h3>
+              <p>Add a PDF, Word document, text file, or source code. StudyBuddy keeps its content, notes, and conversations together.</p>
+              <div class="empty-actions">
+                <label for="pdf-upload-welcome" class="btn btn-primary">Choose document</label>
+                <button id="btn-load-sample" class="btn btn-secondary">Explore a sample</button>
               </div>
             </div>
           </div>
@@ -149,6 +147,14 @@
           <!-- PDF Document Container (rendered here) -->
           <div class="pdf-scroll-container" id="pdf-scroll-container" style="display: none;">
             <div id="pdf-viewer-content" class="pdfViewer"></div>
+          </div>
+          <div class="text-document-container" id="text-document-container" style="display: none;">
+            <div class="text-document-toolbar">
+              <span class="text-document-badge" id="text-document-badge">TEXT</span>
+              <span class="text-document-status" id="text-document-status">Saved locally</span>
+              <button class="btn btn-secondary btn-sm" id="btn-save-document" title="Save document (⌘S)">Save</button>
+            </div>
+            <textarea id="text-document-editor" class="text-document-editor" spellcheck="true" aria-label="Document editor"></textarea>
           </div>
         </section>
         
@@ -161,15 +167,15 @@
         <section class="workspace-panel" id="workspace-panel">
           <!-- Tab Navigation -->
           <div class="tabs-header">
-            <button class="tab-btn active" data-tab="tab-ai" id="tab-btn-ai">
+            <button class="tab-btn active" data-tab="tab-ai" id="tab-btn-ai" title="Open Buddy (⌘1)">
               <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.39.4.08.56-.17.56-.38 0-.19-.01-.82-.01-1.49-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85 0 1.34-.01 2.42-.01 2.75 0 .22.15.47.58.38A12.02 12.02 0 0 0 22 12c0-5.52-4.48-10-10-10z" style="display:none;"/><path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l5 5v-5h6c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-9 12l-2-2-2 2V5h6v9z"/></svg>
-              <span>AI Chat</span>
+              <span>Buddy</span>
             </button>
-            <button class="tab-btn" data-tab="tab-notes" id="tab-btn-notes">
+            <button class="tab-btn" data-tab="tab-notes" id="tab-btn-notes" title="Open Notes (⌘2)">
               <svg viewBox="0 0 24 24" width="16" height="16"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
-              <span>Study Notes</span>
+              <span>Notes</span>
             </button>
-            <button class="tab-btn" data-tab="tab-flashcards" id="tab-btn-flashcards">
+            <button class="tab-btn" data-tab="tab-flashcards" id="tab-btn-flashcards" hidden>
               <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
               <span>Flashcards</span>
             </button>
@@ -183,15 +189,10 @@
               <div class="chat-container">
                 <div class="chat-messages" id="chat-messages">
                   <div class="message system-message">
-                    <p>🤖 <strong>Study AI Assistant Active</strong></p>
-                    <p>Select text in the PDF reader to open the Floating Actions box. You can execute quick actions or type commands like:</p>
-                    <ul>
-                      <li><code>/summarize</code> — Summarize selected text in a paragraph</li>
-                      <li><code>/keypoints</code> — Extract key bullet points</li>
-                      <li><code>/explain</code> — Explain complex concepts</li>
-                      <li><code>/flashcard</code> — Make study cards</li>
-                    </ul>
-                    <p>You can also ask general questions about your text below!</p>
+                    <div class="assistant-orb" aria-hidden="true"></div>
+                    <strong>Your reading buddy is ready.</strong>
+                    <p>Ask Buddy about any chapter, topic, definition, or idea in this document.</p>
+                    <div class="rag-status" id="rag-status"><i></i><span>Preparing local document memory…</span></div>
                   </div>
                 </div>
                 
@@ -204,7 +205,7 @@
                 
                 <!-- Chat Input -->
                 <div class="chat-input-area">
-                  <textarea id="chat-input" class="chat-textarea" placeholder="Ask a question or enter a command..." rows="1"></textarea>
+                  <textarea id="chat-input" class="chat-textarea" placeholder="Ask Buddy about this document..." rows="1"></textarea>
                   <button id="btn-chat-send" class="btn btn-primary btn-chat">
                     <svg viewBox="0 0 24 24" width="18" height="18">
                       <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -221,6 +222,7 @@
                 <!-- Local File Connection Bar (Web File System Access) -->
                 <div class="file-connection-card">
                   <div class="file-status-info">
+                    <span class="notes-document-label" id="notes-document-label">Notes for this document</span>
                     <div class="status-indicator-group">
                       <span class="status-dot disconnected" id="file-status-dot"></span>
                       <span class="status-label" id="file-status-text">Disconnected Note File</span>
@@ -243,23 +245,38 @@
                 <div class="note-editor-wrapper">
                   <div class="editor-toolbar">
                     <div class="editor-modes">
-                      <button class="btn btn-secondary btn-xs active" id="editor-btn-write">Write</button>
+                      <button class="btn btn-secondary btn-xs active" id="editor-btn-write" title="Edit notes (⌘E)">Write</button>
                       <button class="btn btn-secondary btn-xs" id="editor-btn-preview">Preview</button>
                     </div>
                     <div class="divider-v" style="margin: 0 8px;"></div>
                     <button class="btn-icon btn-sm" id="editor-btn-bold" title="Bold"><strong>B</strong></button>
                     <button class="btn-icon btn-sm" id="editor-btn-italic" title="Italic"><em>I</em></button>
                     <button class="btn-icon btn-sm" id="editor-btn-header" title="Heading">H</button>
+                    <button class="btn-icon btn-sm editor-math-button" id="editor-btn-inline-math" title="Inline LaTeX (⌘⇧M)">ƒx</button>
+                    <button class="btn-icon btn-sm editor-math-button" id="editor-btn-display-math" title="Display LaTeX">∑</button>
+                    <button class="dictation-button native-only" id="btn-notes-dictation" title="Dictate thoughts with Apple Speech (⌘⇧D)" aria-label="Start notes dictation" style="display:none;">
+                      <span class="dictation-pulse" aria-hidden="true"></span>
+                      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-1-9a1 1 0 1 1 2 0v6a1 1 0 1 1-2 0V5Zm7 6a6 6 0 0 1-5 5.91V20h3v2H8v-2h3v-3.09A6 6 0 0 1 6 11h2a4 4 0 0 0 8 0h2Z"/></svg>
+                      <span id="dictation-label">Dictate</span>
+                    </button>
                     <div class="divider-v" style="margin: 0 8px;"></div>
-                    <button class="btn btn-secondary btn-xs" id="editor-btn-clear" style="margin-left: auto;">Clear Notes</button>
+                    <button class="btn btn-secondary btn-xs" id="editor-btn-clear" style="margin-left: auto;" title="Clear all notes">Clear</button>
                   </div>
-                  <textarea id="notes-textarea" class="notes-textarea" placeholder="Start typing notes here. Select text in the PDF reader to quickly append highlights to this workspace..."></textarea>
+                  <textarea id="notes-textarea" class="notes-textarea" placeholder="Write with Markdown and LaTeX. Use $...$ for inline math or $$...$$ for display equations."></textarea>
                   <div id="notes-preview" class="notes-preview" style="display: none;" placeholder="Preview of your notes will appear here..."></div>
                 </div>
                 
                 <!-- Note Exports -->
                 <div class="note-export-actions">
-                  <div class="export-dropdown-group" style="display: flex; gap: 8px;">
+                  <div class="note-output-options">
+                    <label for="note-output-style">Style</label>
+                    <select id="note-output-style" title="Choose note preview and PDF style">
+                      <option value="typeset">Typeset</option>
+                      <option value="handwritten">Handwriting</option>
+                    </select>
+                    <button class="btn btn-secondary" id="btn-export-cheatsheet" title="Create a compact PDF cheat sheet from all notes">Cheat Sheet</button>
+                  </div>
+                  <div class="export-dropdown-group">
                     <button class="btn btn-secondary" id="btn-export-txt" title="Export as plain text">
                       <svg viewBox="0 0 24 24" width="14" height="14" style="fill:currentColor; margin-right:4px;"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
                       TXT
@@ -279,7 +296,7 @@
             </div>
             
             <!-- 3. Flashcards Tab -->
-            <div class="tab-pane" id="tab-flashcards">
+            <div class="tab-pane" id="tab-flashcards" hidden>
               <div class="flashcards-container">
                 <div class="flashcards-summary">
                   <span id="flashcard-count-label">0 Flashcards Generated</span>
@@ -336,7 +353,7 @@
       <div id="floating-toolbar" class="floating-toolbar" style="display: none;">
         <!-- Actions section -->
         <div class="toolbar-actions" id="toolbar-actions-section">
-          <span style="font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 4px;">Highlight:</span>
+          <span class="toolbar-section-label">Highlight <kbd>⌘⇧H</kbd></span>
           <button class="toolbar-btn btn-highlight yellow" data-color="yellow" title="Highlight Yellow">
             <span class="color-dot yellow"></span>
           </button>
@@ -349,7 +366,7 @@
           
           <span style="width: 1px; height: 16px; background: rgba(255,255,255,0.15); margin: 0 8px;"></span>
           
-          <span style="font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 4px;">Add to Notes:</span>
+          <span class="toolbar-section-label">Add to Notes <kbd>⌘⇧N</kbd></span>
           <button class="btn-format-note bold" id="btn-format-bold" title="Add as Bold">
             <span style="font-weight: 800; font-size: 12px; color: var(--text-main);">B</span>
           </button>
@@ -408,7 +425,7 @@
           <div class="result-header">
             <div class="siri-glow-indicator">
               <span class="glow-dot"></span>
-              <span class="glow-label" id="result-status-title">Study AI Summary</span>
+              <span class="glow-label" id="result-status-title">Buddy Summary</span>
             </div>
             <div class="result-header-actions">
               <button class="btn-icon-sm" id="btn-result-add-note" title="Add this summary to notes file">
@@ -434,15 +451,32 @@
           </header>
           
           <div class="modal-body">
-            <p>Select your preferred AI Provider. You can use Google Gemini (Cloud API) or your local Ollama server running Gemma.</p>
+            <p class="settings-intro">Reading, document mapping, notes, and lexical RAG work locally. Choose how Buddy should generate answers; cloud providers remain optional.</p>
             
             <div class="form-group">
               <label for="ai-provider">AI Provider</label>
               <select id="ai-provider">
                 <option value="demo">Demo Mode (Simulated)</option>
                 <option value="gemini">Google Gemini (Cloud)</option>
-                <option value="ollama">Ollama (Local Model)</option>
+                <option value="openai-compatible">OpenAI-Compatible API</option>
+                <option value="ollama">Ollama · Existing Local Server</option>
               </select>
+            </div>
+
+            <div id="settings-group-openai" style="display: none; flex-direction: column; gap: 12px; margin-top: 10px;">
+              <div class="form-group">
+                <label for="openai-base-url">API Endpoint</label>
+                <input type="url" id="openai-base-url" placeholder="https://api.openai.com/v1" />
+                <small>Any service implementing <code>/chat/completions</code>. The endpoint must allow browser requests.</small>
+              </div>
+              <div class="form-group">
+                <label for="openai-model">Model</label>
+                <input type="text" id="openai-model" placeholder="gpt-4.1-mini" />
+              </div>
+              <div class="form-group">
+                <label for="openai-api-key">API Key</label>
+                <input type="password" id="openai-api-key" placeholder="Your provider API key" />
+              </div>
             </div>
             
             <!-- Gemini Settings -->
@@ -462,14 +496,22 @@
               </div>
               <div class="form-group">
                 <label for="ollama-model-select">Local Model</label>
-                <div style="display: flex; gap: 8px;">
-                  <select id="ollama-model-select" style="flex: 1;">
-                    <option value="gemma">gemma (Default)</option>
-                    <option value="gemma2">gemma2</option>
+                <div class="ollama-model-row">
+                  <select id="ollama-model-select">
+                    <option value="gemma3:4b">Gemma 3 4B · Recommended compact multimodal</option>
+                    <option value="gemma3:4b-it-qat">Gemma 3 4B QAT · Compact alternative</option>
+                    <option value="gemma3n:e2b">Gemma 3n E2B · Efficient but larger download</option>
+                    <option value="gemma3n:e4b">Gemma 3n E4B · Higher quality, larger download</option>
                   </select>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-models" style="padding: 0 16px;">Scan</button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-models">Scan</button>
                 </div>
-                <small id="ollama-status-text">Click Scan to detect local models (e.g. gemma, llama3)</small>
+                <small id="ollama-status-text">Gemma 3 4B is the compact multimodal default. Built-in lexical RAG avoids a separate embedding model.</small>
+                <button type="button" class="btn btn-primary btn-sm native-only" id="btn-native-install-ai" style="display:none; align-self:flex-start;">Install Local AI…</button>
+              </div>
+              <div class="offline-edition-card">
+                <span class="offline-edition-icon">↓</span>
+                <span><strong>Need everything included?</strong><small>Get the Offline Mac edition with Ollama and Gemma 3 4B bundled.</small></span>
+                <a class="btn btn-secondary btn-sm" href="https://github.com/vashisht7/StudyBuddy/releases/latest" target="_blank" rel="noopener noreferrer">Offline DMG</a>
               </div>
             </div>
             
@@ -489,7 +531,7 @@
       <dialog id="auth-dialog" class="settings-modal auth-modal" closedby="any" aria-labelledby="auth-dialog-title">
         <div class="modal-content">
           <header class="modal-header">
-            <h3 id="auth-dialog-title">Cloud Synchronization</h3>
+            <h3 id="auth-dialog-title">Your Local Profile</h3>
             <button id="btn-close-auth" class="btn-icon">
               <svg viewBox="0 0 24 24" width="20" height="20"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
             </button>
@@ -498,16 +540,20 @@
           <div class="modal-body auth-modal-body">
             <div class="auth-profile-card">
               <div class="auth-avatar-large" id="auth-avatar-large">👤</div>
-              <h4 id="auth-user-name">Guest Student</h4>
-              <p id="auth-user-email">Anonymous Guest Session</p>
-              <span id="auth-cloud-badge" class="badge badge-demo">Local Temp Storage</span>
+              <h4 id="auth-user-name">Local Student</h4>
+              <p id="auth-user-email">No account connected</p>
+              <span id="auth-cloud-badge" class="badge badge-active">LOCAL DATA ONLY</span>
             </div>
             
             <p class="auth-info-text">
-              By default, your highlights, notes, and progress are saved locally. Sign in with Google to enable permanent cloud backups and synchronize your workspace across devices.
+              Sign in to personalize StudyBuddy. Your documents, highlights, notes, chats, and reading progress stay on this device. Cloud synchronization is disabled in this release.
             </p>
             
             <div class="auth-actions-group">
+              <button id="btn-apple-signin" class="btn btn-large btn-apple-login">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M17.05 12.54c-.03-3.04 2.48-4.52 2.59-4.59a5.57 5.57 0 0 0-4.38-2.37c-1.84-.19-3.63 1.1-4.57 1.1-.96 0-2.41-1.08-3.98-1.05a5.8 5.8 0 0 0-4.88 2.98c-2.12 3.67-.54 9.07 1.49 12.04 1.02 1.46 2.2 3.08 3.77 3.02 1.53-.06 2.1-.97 3.94-.97 1.82 0 2.36.97 3.95.93 1.65-.02 2.69-1.46 3.67-2.93a12 12 0 0 0 1.68-3.42 5.23 5.23 0 0 1-3.28-4.74ZM14.06 3.63A5.3 5.3 0 0 0 15.27 0a5.4 5.4 0 0 0-3.49 1.73 5.04 5.04 0 0 0-1.24 3.49 4.46 4.46 0 0 0 3.52-1.59Z"/></svg>
+                Continue with Apple
+              </button>
               <button id="btn-google-signin" class="btn btn-primary btn-large btn-google-login">
                 <svg viewBox="0 0 24 24" width="18" height="18" style="fill: currentColor; margin-right: 8px;">
                   <path d="M21.35 11.1h-9.17v2.73h6.51c-.33 1.56-1.56 2.95-3.24 3.5v2.9h5.25c3.07-2.84 4.84-7 4.84-12.03 0-.7-.06-1.37-.19-2.1z" style="fill: #4285F4;"/>
@@ -550,13 +596,6 @@
       </dialog>
       
     </div>
-    
-    <!-- Load PDF.js from CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-      // Initialize the worker source from the same CDN
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-    </script>
     
     <!-- Load main script -->
     <script type="module" src="/src/main.js"></script>
