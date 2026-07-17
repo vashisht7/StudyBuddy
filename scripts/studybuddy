@@ -1,0 +1,24 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+case "${1:-help}" in
+  setup-ai)
+    exec bash "$SCRIPT_DIR/setup-local-ai.sh"
+    ;;
+  start)
+    cd "$PROJECT_DIR"
+    exec npm run dev -- --host 127.0.0.1
+    ;;
+  help|--help|-h)
+    echo "StudyBuddy CLI"
+    echo "  studybuddy setup-ai   Choose and download a local AI package"
+    echo "  studybuddy start      Start the source/developer web app"
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    exit 1
+    ;;
+esac

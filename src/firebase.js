@@ -3,15 +3,19 @@ import {
   getAuth, 
   signInAnonymously, 
   GoogleAuthProvider, 
-  signInWithPopup, 
+  OAuthProvider,
+  signInWithPopup,
+  linkWithPopup,
   signOut, 
   onAuthStateChanged 
 } from 'firebase/auth';
 import {
   getFirestore,
   doc,
+  collection,
   setDoc,
   getDoc,
+  getDocs,
   onSnapshot
 } from 'firebase/firestore';
 import {
@@ -46,12 +50,16 @@ export {
   storage,
   signInAnonymously,
   GoogleAuthProvider,
+  OAuthProvider,
   signInWithPopup,
+  linkWithPopup,
   signOut,
   onAuthStateChanged,
   doc,
+  collection,
   setDoc,
   getDoc,
+  getDocs,
   onSnapshot,
   ref,
   uploadBytes,

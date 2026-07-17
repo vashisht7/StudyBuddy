@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.vashisht.studybuddy.speech</string>
+  <key>CFBundleName</key>
+  <string>StudyBuddy Speech</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>StudyBuddy uses the microphone only while you dictate your own thoughts into Study Notes.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>StudyBuddy converts your spoken thoughts into Study Notes using Apple on-device speech recognition.</string>
+</dict>
+</plist>

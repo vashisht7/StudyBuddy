@@ -1,23 +1,34 @@
 import './style.css';
+import 'pdfjs-dist/web/pdf_viewer.css';
+import * as pdfjsLib from 'pdfjs-dist/build/pdf.js';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
+import 'katex/dist/katex.min.css';
+import katexCss from 'katex/dist/katex.min.css?inline';
+import * as mammoth from 'mammoth';
+import { buildNotesExportDocument, convertMarkdownToHtml } from './notes-export.js';
 import {
   auth,
   db,
   storage,
   signInAnonymously,
   GoogleAuthProvider,
+  OAuthProvider,
   signInWithPopup,
+  linkWithPopup,
   signOut,
   onAuthStateChanged,
   doc,
+  collection,
   setDoc,
   getDoc,
+  getDocs,
   ref,
   uploadBytes,
   getDownloadURL
 } from './firebase.js';
 
-// PDF.js global setup
-const pdfjsLib = window.pdfjsLib;
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+document.documentElement.classList.toggle('native-app', Boolean(window.studybuddy?.isNative));
 
 // Application State
 let pdfDoc = null;
@@ -30,7 +41,15 @@ let notesFileHandle = null;
 let geminiApiKey = localStorage.getItem('study_gemini_api_key') || '';
 let aiProvider = localStorage.getItem('study_ai_provider') || 'demo';
 let ollamaUrl = localStorage.getItem('study_ollama_url') || 'http://localhost:11434';
-let ollamaModel = localStorage.getItem('study_ollama_model') || 'gemma';
+let ollamaModel = localStorage.getItem('study_ollama_model') || 'gemma3:4b';
+let openAIBaseUrl = localStorage.getItem('study_openai_base_url') || 'https://api.openai.com/v1';
+let openAIModel = localStorage.getItem('study_openai_model') || 'gpt-4.1-mini';
+let openAIApiKey = localStorage.getItem('study_openai_api_key') || '';
+// Account sign-in is identity-only for this release. Workspace data stays in
+// IndexedDB/localStorage even when the user signs in with Apple or Google.
+const cloudSyncEnabled = false;
+localStorage.removeItem('study_cloud_sync_enabled');
+let firebaseAuthInitialized = false;
 let flashcards = JSON.parse(localStorage.getItem('study_flashcards') || '[]');
 let currentCardIndex = 0;
 let selectedText = '';
@@ -38,6 +57,33 @@ let selectedTextPageNum = 1;
 let selectionHighlightsMap = {};
 let selectedPagesList = [];
 let highlights = JSON.parse(localStorage.getItem('study_highlights') || '{}');
+let activeDocumentId = null;
+let activeDocumentName = '';
+let activeDocumentType = 'pdf';
+let activeDocumentText = '';
+let initialAssistantMarkup = '';
+let currentDocumentOutline = [];
+let currentDocumentKind = 'document';
+let currentDocumentAnalysisText = '';
+let currentRagIndex = null;
+let ragBuildPromise = null;
+
+async function ollamaFetch(path, options = {}) {
+  if (window.studybuddy?.ollamaFetch) {
+    const result = await window.studybuddy.ollamaFetch(path, {
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      body: options.body || null
+    });
+    return {
+      ok: result.ok,
+      status: result.status,
+      json: async () => result.data,
+      text: async () => typeof result.data === 'string' ? result.data : JSON.stringify(result.data)
+    };
+  }
+  return fetch(`/api/ollama${path}`, options);
+}
 let temporaryHighlight = null;
 let pdfPageImages = {};
 let currentUser = null;
@@ -494,8 +540,10 @@ let pageObserver = null;
 // Local Storage for Large Files (IndexedDB)
 // ==========================================================================
 const DB_NAME = 'StudyBuddyDB';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 const STORE_NAME = 'pdf_store';
+const LIBRARY_STORE_NAME = 'document_library';
+const RAG_STORE_NAME = 'rag_indexes';
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -505,10 +553,221 @@ function openDB() {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
+      if (!db.objectStoreNames.contains(LIBRARY_STORE_NAME)) {
+        db.createObjectStore(LIBRARY_STORE_NAME, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(RAG_STORE_NAME)) {
+        db.createObjectStore(RAG_STORE_NAME, { keyPath: 'documentId' });
+      }
     };
     request.onsuccess = (e) => resolve(e.target.result);
     request.onerror = (e) => reject(e.target.error);
   });
+}
+
+function documentSessionKey(id) {
+  return `study_document_session_${id}`;
+}
+
+function normalizeBuddyMarkup(markup = initialAssistantMarkup) {
+  return String(markup || initialAssistantMarkup)
+    .replace(/How can I help with this document\?/g, 'Your reading buddy is ready.')
+    .replace(/Ask about any chapter, topic, definition, or idea in this document\./g, 'Ask Buddy about any chapter, topic, definition, or idea in this document.')
+    .replace(/Study AI Assistant/gi, 'Buddy');
+}
+
+function createDocumentId(fileName, size = 0, stamp = Date.now()) {
+  const source = `${fileName}-${size}-${stamp}`.toLowerCase();
+  let hash = 0;
+  for (let index = 0; index < source.length; index++) {
+    hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;
+  }
+  return `doc-${Math.abs(hash).toString(36)}`;
+}
+
+async function saveLibraryDocument(record) {
+  const db = await openDB();
+  const tx = db.transaction(LIBRARY_STORE_NAME, 'readwrite');
+  tx.objectStore(LIBRARY_STORE_NAME).put(record);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getLibraryDocuments() {
+  const db = await openDB();
+  const tx = db.transaction(LIBRARY_STORE_NAME, 'readonly');
+  const request = tx.objectStore(LIBRARY_STORE_NAME).getAll();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getLibraryDocument(id) {
+  const db = await openDB();
+  const tx = db.transaction(LIBRARY_STORE_NAME, 'readonly');
+  const request = tx.objectStore(LIBRARY_STORE_NAME).get(id);
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveRagIndex(index) {
+  const db = await openDB();
+  const tx = db.transaction(RAG_STORE_NAME, 'readwrite');
+  tx.objectStore(RAG_STORE_NAME).put(index);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getRagIndex(documentId) {
+  const db = await openDB();
+  const tx = db.transaction(RAG_STORE_NAME, 'readonly');
+  const request = tx.objectStore(RAG_STORE_NAME).get(documentId);
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function saveActiveDocumentSession() {
+  if (!activeDocumentId) return;
+  const notes = document.getElementById('notes-textarea')?.value || '';
+  const chat = document.getElementById('chat-messages')?.innerHTML || initialAssistantMarkup;
+  localStorage.setItem(documentSessionKey(activeDocumentId), JSON.stringify({
+    notes,
+    chat,
+    notesDocumentId: activeDocumentId,
+    chatDocumentId: activeDocumentId,
+    documentName: activeDocumentName,
+    page: currentPageNum,
+    scale: pdfScale,
+    highlights,
+    outline: currentDocumentOutline,
+    documentKind: currentDocumentKind,
+    outlineVersion: 5,
+    updatedAt: Date.now()
+  }));
+}
+
+function restoreDocumentSession(id) {
+  let session = {};
+  try { session = JSON.parse(localStorage.getItem(documentSessionKey(id)) || '{}'); } catch (_) {}
+  currentPageNum = session.page || 1;
+  pdfScale = session.scale || 1.2;
+  highlights = session.highlights || {};
+  currentDocumentOutline = session.outlineVersion === 5 ? (session.outline || []) : [];
+  currentDocumentKind = session.documentKind || 'document';
+  const notes = document.getElementById('notes-textarea');
+  const chat = document.getElementById('chat-messages');
+  if (notes) notes.value = session.notes || '';
+  const chatBelongsToDocument = session.chatDocumentId === id;
+  if (chat) chat.innerHTML = chatBelongsToDocument ? normalizeBuddyMarkup(session.chat) : initialAssistantMarkup;
+  localStorage.setItem('study_notes', session.notes || '');
+  localStorage.setItem('study_highlights', JSON.stringify(highlights));
+  document.getElementById('zoom-text').textContent = `${Math.round(pdfScale * 100)}%`;
+  if (currentDocumentOutline.length) renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+}
+
+function formatDocumentDate(timestamp) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(timestamp));
+}
+
+function documentExtension(fileName = '') {
+  return fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : 'txt';
+}
+
+function documentTypeLabel(fileName = '') {
+  const extension = documentExtension(fileName);
+  if (extension === 'pdf') return 'PDF';
+  if (extension === 'docx') return 'DOCX';
+  if (['md', 'markdown'].includes(extension)) return 'MD';
+  return extension.toUpperCase().slice(0, 5) || 'TEXT';
+}
+
+function isPdfDocument(record) {
+  return documentExtension(record?.fileName) === 'pdf';
+}
+
+async function renderLibrary() {
+  const grid = document.getElementById('library-grid');
+  const empty = document.getElementById('library-empty');
+  if (!grid || !empty) return;
+  const documents = (await getLibraryDocuments()).sort((a, b) => b.updatedAt - a.updatedAt);
+  grid.innerHTML = '';
+  empty.style.display = documents.length ? 'none' : 'flex';
+  grid.style.display = documents.length ? 'grid' : 'none';
+
+  documents.forEach((documentRecord, index) => {
+    let session = {};
+    try { session = JSON.parse(localStorage.getItem(documentSessionKey(documentRecord.id)) || '{}'); } catch (_) {}
+    const card = document.createElement('button');
+    card.className = 'document-card';
+    card.dataset.documentId = documentRecord.id;
+    card.style.setProperty('--card-index', index);
+    card.innerHTML = `
+      <span class="document-cover">
+        <span class="document-fold"></span>
+        <span class="document-lines"><i></i><i></i><i></i></span>
+        <span class="document-type">${documentTypeLabel(documentRecord.fileName)}</span>
+      </span>
+      <span class="document-info">
+        <strong>${escapeHtml(documentRecord.fileName.replace(/\.[^.]+$/i, ''))}</strong>
+        <span>${isPdfDocument(documentRecord) && session.page ? `Page ${session.page} · ` : ''}${formatDocumentDate(documentRecord.updatedAt)}</span>
+      </span>
+      <span class="document-arrow">→</span>`;
+    card.addEventListener('click', () => openLibraryDocument(documentRecord.id));
+    grid.appendChild(card);
+  });
+}
+
+async function openLibraryDocument(id) {
+  saveActiveDocumentSession();
+  const record = await getLibraryDocument(id);
+  if (!record) return;
+  activeDocumentId = id;
+  activeDocumentName = record.fileName;
+  activeDocumentType = documentExtension(record.fileName);
+  currentRagIndex = null;
+  ragBuildPromise = null;
+  restoreDocumentSession(id);
+  const notesLabel = document.getElementById('notes-document-label');
+  if (notesLabel) notesLabel.textContent = `Notes · ${record.fileName.replace(/\.[^.]+$/i, '')}`;
+  document.getElementById('app').classList.remove('library-mode');
+  document.getElementById('welcome-screen').style.display = 'none';
+  document.getElementById('workspace-panel').classList.remove('collapsed');
+  document.getElementById('btn-toggle-sidebar').classList.add('active');
+  if (isPdfDocument(record)) {
+    document.getElementById('app').classList.remove('text-document-mode');
+    document.getElementById('text-document-container').style.display = 'none';
+    document.getElementById('pdf-scroll-container').style.display = 'flex';
+    await loadPdfDoc(new Uint8Array(record.arrayBuffer));
+  } else {
+    await openTextDocument(record);
+  }
+  await loadActiveDocumentCloudSession();
+}
+
+async function showLibrary() {
+  saveActiveDocumentSession();
+  activeDocumentId = null;
+  activeDocumentName = '';
+  activeDocumentText = '';
+  currentRagIndex = null;
+  ragBuildPromise = null;
+  document.getElementById('app').classList.add('library-mode');
+  document.getElementById('welcome-screen').style.display = 'flex';
+  document.getElementById('pdf-scroll-container').style.display = 'none';
+  document.getElementById('text-document-container').style.display = 'none';
+  document.getElementById('app').classList.remove('text-document-mode');
+  document.getElementById('workspace-panel').classList.add('collapsed');
+  document.getElementById('btn-toggle-sidebar').classList.remove('active');
+  await renderLibrary();
 }
 
 // Each signed-in account gets its own IndexedDB key so switching accounts
@@ -569,19 +828,27 @@ async function restorePersistedPdf() {
   return false;
 }
 
-// Uploads the active PDF to this account's private Storage folder and
-// records its location on the Firestore session doc so it follows the
-// account across devices/browsers.
-async function uploadPdfToCloud(arrayBuffer, fileName) {
-  if (!currentUser) return;
-  try {
-    const storagePath = `users/${currentUser.uid}/pdfs/${fileName}`;
-    await uploadBytes(ref(storage, storagePath), arrayBuffer);
+function safeCloudFileName(fileName) {
+  return (fileName || 'document.pdf').replace(/[^a-z0-9._-]+/gi, '-');
+}
 
-    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
-    await setDoc(sessionDocRef, {
-      pdfFileName: fileName,
+// Every PDF has its own private Storage object and Firestore workspace
+// document. The RAG index is derived locally from the PDF on each device.
+async function uploadPdfToCloud(arrayBuffer, fileName, documentId = activeDocumentId) {
+  if (!cloudSyncEnabled || !currentUser || !documentId) return;
+  const bytes = arrayBuffer instanceof ArrayBuffer ? arrayBuffer : arrayBuffer.buffer;
+  try {
+    const storagePath = `users/${currentUser.uid}/documents/${documentId}/${safeCloudFileName(fileName)}`;
+    await uploadBytes(ref(storage, storagePath), bytes);
+
+    const documentDocRef = doc(db, 'users', currentUser.uid, 'documents', documentId);
+    await setDoc(documentDocRef, {
+      documentId,
+      fileName,
+      size: bytes.byteLength,
+      fileStoragePath: storagePath,
       pdfStoragePath: storagePath,
+      documentType: documentExtension(fileName),
       updatedAt: new Date().toISOString()
     }, { merge: true });
   } catch (err) {
@@ -590,30 +857,72 @@ async function uploadPdfToCloud(arrayBuffer, fileName) {
   }
 }
 
-// Loads the signed-in account's own PDF from Storage (if any). Returns
-// true if a document was restored, false otherwise.
-async function loadUserPdfFromCloud() {
-  if (!currentUser) return false;
+async function syncLocalLibraryToCloud() {
+  if (!cloudSyncEnabled || !currentUser) return;
+  const localDocuments = await getLibraryDocuments();
+  for (const record of localDocuments) {
+    try {
+      const cloudRef = doc(db, 'users', currentUser.uid, 'documents', record.id);
+      const cloudSnapshot = await getDoc(cloudRef);
+      const cloudData = cloudSnapshot.exists() ? cloudSnapshot.data() : null;
+      if ((cloudData?.fileStoragePath || cloudData?.pdfStoragePath) && Number(cloudData.size) === Number(record.size)) continue;
+      await uploadPdfToCloud(record.arrayBuffer, record.fileName, record.id);
+    } catch (error) {
+      console.warn(`Could not upload ${record.fileName}`, error);
+    }
+  }
+}
+
+async function syncCloudLibraryToLocal() {
+  if (!cloudSyncEnabled || !currentUser) return;
   try {
-    const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
-    const docSnap = await getDoc(sessionDocRef);
-    if (!docSnap.exists() || !docSnap.data().pdfStoragePath) return false;
+    const documentsRef = collection(db, 'users', currentUser.uid, 'documents');
+    const cloudDocuments = await getDocs(documentsRef);
+    for (const cloudSnapshot of cloudDocuments.docs) {
+      const data = cloudSnapshot.data();
+      const documentId = data.documentId || cloudSnapshot.id;
+      const storagePath = data.fileStoragePath || data.pdfStoragePath;
+      if (!storagePath || !data.fileName) continue;
 
-    const { pdfStoragePath, pdfFileName } = docSnap.data();
-    const url = await getDownloadURL(ref(storage, pdfStoragePath));
-    const res = await fetch(url);
-    const arrayBuffer = await res.arrayBuffer();
+      let localRecord = await getLibraryDocument(documentId);
+      if (!localRecord) {
+        const url = await getDownloadURL(ref(storage, storagePath));
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Could not download ${data.fileName}`);
+        const arrayBuffer = await response.arrayBuffer();
+        localRecord = {
+          id: documentId,
+          arrayBuffer,
+          fileName: data.fileName,
+          size: data.size || arrayBuffer.byteLength,
+          updatedAt: Date.parse(data.updatedAt) || Date.now()
+        };
+        await saveLibraryDocument(localRecord);
+      }
 
-    document.getElementById('welcome-screen').style.display = 'none';
-    document.getElementById('pdf-scroll-container').style.display = 'flex';
-    addSystemChatMessage(`Restoring your document: <strong>${pdfFileName}</strong>...`, "primary");
-
-    await loadPdfDoc(new Uint8Array(arrayBuffer));
-    await savePdfToIndexedDB(arrayBuffer, pdfFileName);
-    return true;
+      let localSession = {};
+      try { localSession = JSON.parse(localStorage.getItem(documentSessionKey(documentId)) || '{}'); } catch (_) {}
+      const cloudUpdatedAt = Date.parse(data.updatedAt) || 0;
+      if (cloudUpdatedAt > Number(localSession.updatedAt || 0)) {
+        localStorage.setItem(documentSessionKey(documentId), JSON.stringify({
+          notes: data.notes || '',
+          chat: normalizeBuddyMarkup(data.chat),
+          notesDocumentId: documentId,
+          chatDocumentId: documentId,
+          documentName: data.fileName,
+          page: data.currentPageNum || 1,
+          scale: data.pdfScale || 1.2,
+          highlights: data.highlights || {},
+          outline: data.outline || [],
+          documentKind: data.documentKind || 'document',
+          outlineVersion: 5,
+          updatedAt: cloudUpdatedAt
+        }));
+      }
+    }
   } catch (err) {
-    console.error("Failed to load this account's PDF from cloud", err);
-    return false;
+    console.error("Failed to sync this account's cloud library", err);
+    addSystemChatMessage("Could not refresh the cloud library. Local documents remain available.", "warning");
   }
 }
 
@@ -809,7 +1118,7 @@ async function onCaptureMouseUp(e) {
           if (notesTabBtn) {
             notesTabBtn.click();
           }
-          addSystemChatMessage("Appended captured image directly to your study notes workspace.", "success");
+          addSystemChatMessage("Appended the captured image directly to Notes.", "success");
         }
         captureDialog.close();
       });
@@ -827,6 +1136,7 @@ async function onCaptureMouseUp(e) {
 
 // Initialize application on load
 document.addEventListener('DOMContentLoaded', () => {
+  initialAssistantMarkup = document.getElementById('chat-messages')?.innerHTML || '';
   initResizer();
   initTabs();
   initSettings();
@@ -834,10 +1144,14 @@ document.addEventListener('DOMContentLoaded', () => {
   initPdfControls();
   initFloatingToolbar();
   initNotesEditor();
-  initFlashcards();
   initImageSelectionTracker();
   initSidebarToggle();
   initCaptureMode();
+  initDocumentOutline();
+  initTextDocumentEditor();
+  initCustomSelects();
+  initNotesDictation();
+  initKeyboardShortcuts();
   
   // Try loading API status
   updateApiStatusDisplay();
@@ -848,7 +1162,105 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initialize Firebase Auth
   initFirebaseAuth();
+  document.getElementById('btn-home')?.addEventListener('click', showLibrary);
+  document.getElementById('notes-textarea')?.addEventListener('input', debounce(saveActiveDocumentSession, 350));
+  window.addEventListener('beforeunload', saveActiveDocumentSession);
+  showLibrary();
 });
+
+function initCustomSelects() {
+  document.querySelectorAll('select').forEach((select) => {
+    if (select.dataset.liquidSelect === 'true') return;
+    select.dataset.liquidSelect = 'true';
+
+    const shell = document.createElement('div');
+    shell.className = 'liquid-select';
+    select.parentNode.insertBefore(shell, select);
+    shell.appendChild(select);
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'liquid-select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.innerHTML = '<span></span><i aria-hidden="true"></i>';
+
+    const menu = document.createElement('div');
+    menu.className = 'liquid-select-menu';
+    menu.setAttribute('role', 'listbox');
+    menu.setAttribute('popover', 'auto');
+    shell.append(trigger, menu);
+
+    const positionMenu = () => {
+      const rect = trigger.getBoundingClientRect();
+      menu.style.left = `${Math.max(10, Math.min(rect.left, window.innerWidth - Math.max(rect.width, 220) - 10))}px`;
+      menu.style.top = `${Math.min(rect.bottom + 7, window.innerHeight - Math.min(menu.scrollHeight || 280, 280) - 12)}px`;
+      menu.style.width = `${Math.max(rect.width, 220)}px`;
+    };
+
+    const sync = () => {
+      const selected = select.options[select.selectedIndex];
+      trigger.querySelector('span').textContent = selected?.textContent || 'Choose';
+      menu.querySelectorAll('[role="option"]').forEach((option) => {
+        const active = option.dataset.value === select.value;
+        option.classList.toggle('selected', active);
+        option.setAttribute('aria-selected', String(active));
+      });
+      trigger.disabled = select.disabled;
+    };
+
+    const rebuild = () => {
+      menu.innerHTML = '';
+      [...select.options].forEach((nativeOption) => {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'liquid-select-option';
+        option.dataset.value = nativeOption.value;
+        option.setAttribute('role', 'option');
+        option.disabled = nativeOption.disabled;
+        option.innerHTML = '<span></span><i aria-hidden="true">✓</i>';
+        option.querySelector('span').textContent = nativeOption.textContent;
+        option.addEventListener('click', () => {
+          select.value = nativeOption.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          menu.hidePopover?.();
+          trigger.focus();
+          sync();
+        });
+        menu.appendChild(option);
+      });
+      sync();
+    };
+
+    trigger.addEventListener('click', () => {
+      positionMenu();
+      if (menu.matches(':popover-open')) menu.hidePopover();
+      else menu.showPopover?.();
+    });
+    trigger.addEventListener('keydown', (event) => {
+      if (!['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
+      positionMenu();
+      if (!menu.matches(':popover-open')) menu.showPopover?.();
+      const options = [...menu.querySelectorAll('.liquid-select-option:not(:disabled)')];
+      const selectedIndex = options.findIndex(option => option.classList.contains('selected'));
+      const target = event.key === 'ArrowUp'
+        ? options[Math.max(0, selectedIndex - 1)]
+        : options[Math.min(options.length - 1, selectedIndex + 1)];
+      target?.focus();
+    });
+    menu.addEventListener('toggle', () => trigger.setAttribute('aria-expanded', String(menu.matches(':popover-open'))));
+    select.addEventListener('change', sync);
+    window.addEventListener('resize', () => { if (menu.matches(':popover-open')) positionMenu(); });
+    new MutationObserver(rebuild).observe(select, { childList: true, subtree: true, attributes: true });
+    document.querySelector(`label[for="${CSS.escape(select.id)}"]`)?.addEventListener('click', (event) => {
+      event.preventDefault();
+      trigger.focus();
+      trigger.click();
+    });
+    rebuild();
+  });
+}
 
 // ==========================================================================
 // Split Pane Resizing
@@ -915,13 +1327,89 @@ function initTabs() {
   tabButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       const targetTab = btn.getAttribute('data-tab');
-      
+      const nextPane = document.getElementById(targetTab);
+      if (!nextPane || btn.classList.contains('active')) return;
+      const currentIndex = Array.from(tabButtons).findIndex(button => button.classList.contains('active'));
+      const nextIndex = Array.from(tabButtons).indexOf(btn);
+
       tabButtons.forEach(b => b.classList.remove('active'));
       tabPanes.forEach(p => p.classList.remove('active'));
-      
+
       btn.classList.add('active');
-      document.getElementById(targetTab).classList.add('active');
+      nextPane.style.setProperty('--tab-direction', nextIndex >= currentIndex ? '1' : '-1');
+      nextPane.classList.add('active');
     });
+  });
+}
+
+function performStudyShortcut(action) {
+  const toolbar = document.getElementById('floating-toolbar');
+  if (action === 'buddy') document.getElementById('tab-btn-ai')?.click();
+  if (action === 'notes') document.getElementById('tab-btn-notes')?.click();
+  if (action === 'toggle-workspace') document.getElementById('btn-toggle-sidebar')?.click();
+  if (action === 'toggle-dictation') document.getElementById('btn-notes-dictation')?.click();
+  if (action === 'edit-notes') {
+    document.getElementById('tab-btn-notes')?.click();
+    document.getElementById('editor-btn-write')?.click();
+    document.getElementById('notes-textarea')?.focus();
+  }
+  if (action === 'highlight-yellow' && selectedText && Object.keys(selectionHighlightsMap || {}).length) {
+    applyHighlight('yellow');
+    if (toolbar) toolbar.style.display = 'none';
+  }
+  if (action === 'add-note' && selectedText) {
+    appendToLocalFile(selectedText, selectedTextPageNum);
+    clearTemporaryHighlight();
+    window.getSelection()?.removeAllRanges();
+    if (toolbar) toolbar.style.display = 'none';
+  }
+}
+
+function initKeyboardShortcuts() {
+  window.studybuddy?.onAppCommand?.(performStudyShortcut);
+  document.addEventListener('keydown', (event) => {
+    const command = event.metaKey || event.ctrlKey;
+    if (!command) {
+      if (event.key === 'Escape') {
+        const toolbar = document.getElementById('floating-toolbar');
+        if (toolbar) toolbar.style.display = 'none';
+        clearTemporaryHighlight();
+      }
+      return;
+    }
+
+    const key = event.key.toLowerCase();
+    const notesEditor = document.getElementById('notes-textarea');
+    const editingNotes = document.activeElement === notesEditor;
+    let action = null;
+
+    if (!event.shiftKey && key === '1') action = 'buddy';
+    if (!event.shiftKey && key === '2') action = 'notes';
+    if (!event.shiftKey && key === 'e') action = 'edit-notes';
+    if (event.altKey && key === 'b') action = 'toggle-workspace';
+    if (event.shiftKey && key === 'h') action = 'highlight-yellow';
+    if (event.shiftKey && key === 'n') action = 'add-note';
+
+    if (editingNotes && !event.shiftKey && key === 'b') {
+      event.preventDefault();
+      document.getElementById('editor-btn-bold')?.click();
+      return;
+    }
+    if (editingNotes && !event.shiftKey && key === 'i') {
+      event.preventDefault();
+      document.getElementById('editor-btn-italic')?.click();
+      return;
+    }
+    if (editingNotes && event.shiftKey && key === 'm') {
+      event.preventDefault();
+      document.getElementById('editor-btn-inline-math')?.click();
+      return;
+    }
+
+    if (action) {
+      event.preventDefault();
+      performStudyShortcut(action);
+    }
   });
 }
 
@@ -936,17 +1424,32 @@ function initSettings() {
   
   const providerSelect = document.getElementById('ai-provider');
   const groupGemini = document.getElementById('settings-group-gemini');
+  const groupOpenAI = document.getElementById('settings-group-openai');
   const groupOllama = document.getElementById('settings-group-ollama');
   
   const inputKey = document.getElementById('gemini-api-key');
+  const inputOpenAIUrl = document.getElementById('openai-base-url');
+  const inputOpenAIModel = document.getElementById('openai-model');
+  const inputOpenAIKey = document.getElementById('openai-api-key');
   const inputOllamaUrl = document.getElementById('ollama-url');
   const selectOllamaModel = document.getElementById('ollama-model-select');
   const btnScan = document.getElementById('btn-refresh-models');
   const statusOllama = document.getElementById('ollama-status-text');
+  const nativeInstallButton = document.getElementById('btn-native-install-ai');
+
+  if (window.studybuddy?.isNative && nativeInstallButton) {
+    nativeInstallButton.style.display = 'inline-flex';
+    nativeInstallButton.addEventListener('click', async () => {
+      await window.studybuddy.installLocalAI();
+      statusOllama.textContent = 'Installer opened in Terminal. Return here and click Scan when it finishes.';
+      statusOllama.style.color = 'var(--aqua)';
+    });
+  }
   
   function toggleSettingsGroups() {
     const val = providerSelect.value;
     groupGemini.style.display = val === 'gemini' ? 'flex' : 'none';
+    groupOpenAI.style.display = val === 'openai-compatible' ? 'flex' : 'none';
     groupOllama.style.display = val === 'ollama' ? 'flex' : 'none';
   }
   
@@ -955,6 +1458,9 @@ function initSettings() {
   btnOpen.addEventListener('click', () => {
     providerSelect.value = aiProvider;
     inputKey.value = geminiApiKey;
+    inputOpenAIUrl.value = openAIBaseUrl;
+    inputOpenAIModel.value = openAIModel;
+    inputOpenAIKey.value = openAIApiKey;
     inputOllamaUrl.value = ollamaUrl;
     
     // Add active model option to select if not already present
@@ -966,6 +1472,8 @@ function initSettings() {
       selectOllamaModel.appendChild(opt);
     }
     selectOllamaModel.value = ollamaModel;
+    providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    selectOllamaModel.dispatchEvent(new Event('change', { bubbles: true }));
     
     toggleSettingsGroups();
     updateApiStatusDisplay();
@@ -977,11 +1485,13 @@ function initSettings() {
   });
   
   btnScan.addEventListener('click', async () => {
+    btnScan.disabled = true;
+    btnScan.classList.add('is-scanning');
     statusOllama.textContent = "Scanning local models...";
     statusOllama.style.color = "var(--text-secondary)";
     
     try {
-      const response = await fetch('/api/ollama/api/tags');
+      const response = await ollamaFetch('/api/tags');
       if (!response.ok) throw new Error("Connection failed");
       
       const data = await response.json();
@@ -1004,6 +1514,7 @@ function initSettings() {
         if (models.some(m => m.name === ollamaModel)) {
           selectOllamaModel.value = ollamaModel;
         }
+        selectOllamaModel.dispatchEvent(new Event('change', { bubbles: true }));
         statusOllama.textContent = `Successfully detected ${models.length} model(s).`;
         statusOllama.style.color = "var(--accent-emerald)";
       }
@@ -1011,17 +1522,26 @@ function initSettings() {
       console.warn("Ollama scan failed", err);
       statusOllama.textContent = "Server offline. Ensure Ollama is running locally.";
       statusOllama.style.color = "var(--accent-rose)";
+    } finally {
+      btnScan.disabled = false;
+      btnScan.classList.remove('is-scanning');
     }
   });
   
   btnSave.addEventListener('click', () => {
     aiProvider = providerSelect.value;
     geminiApiKey = inputKey.value.trim();
+    openAIBaseUrl = inputOpenAIUrl.value.trim().replace(/\/$/, '');
+    openAIModel = inputOpenAIModel.value.trim();
+    openAIApiKey = inputOpenAIKey.value.trim();
     ollamaUrl = inputOllamaUrl.value.trim();
     ollamaModel = selectOllamaModel.value;
     
     localStorage.setItem('study_ai_provider', aiProvider);
     localStorage.setItem('study_gemini_api_key', geminiApiKey);
+    localStorage.setItem('study_openai_base_url', openAIBaseUrl);
+    localStorage.setItem('study_openai_model', openAIModel);
+    localStorage.setItem('study_openai_api_key', openAIApiKey);
     localStorage.setItem('study_ollama_url', ollamaUrl);
     localStorage.setItem('study_ollama_model', ollamaModel);
     
@@ -1031,6 +1551,7 @@ function initSettings() {
     let msg = "AI settings saved. ";
     if (aiProvider === 'demo') msg += "Using simulated Demo Mode.";
     else if (aiProvider === 'gemini') msg += "Using Gemini Cloud API.";
+    else if (aiProvider === 'openai-compatible') msg += `Using ${openAIModel} through an OpenAI-compatible API.`;
     else if (aiProvider === 'ollama') msg += `Using local Ollama model: ${ollamaModel}.`;
     
     addSystemChatMessage(msg, "success");
@@ -1062,6 +1583,12 @@ function updateApiStatusDisplay() {
       settingsBtn.classList.add('btn-secondary');
       settingsBtn.classList.remove('btn-primary');
     }
+  } else if (aiProvider === 'openai-compatible') {
+    badge.className = openAIApiKey ? "badge badge-active" : "badge badge-demo";
+    badge.textContent = openAIApiKey ? "COMPATIBLE API ACTIVE" : "API KEY MISSING";
+    desc.textContent = openAIApiKey ? `${openAIModel} · ${openAIBaseUrl}` : "Enter the key supplied by your compatible API provider.";
+    settingsBtn.classList.toggle('btn-primary', Boolean(openAIApiKey));
+    settingsBtn.classList.toggle('btn-secondary', !openAIApiKey);
   } else if (aiProvider === 'ollama') {
     badge.className = "badge badge-active";
     badge.style.backgroundColor = "rgba(99, 102, 241, 0.15)";
@@ -1083,16 +1610,166 @@ function updateApiStatusDisplay() {
 // ==========================================================================
 // File Upload Actions
 // ==========================================================================
+function buildTextDocumentOutline(text) {
+  const lines = text.split(/\r?\n/);
+  const items = [];
+  let offset = 0;
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    const markdown = line.match(/^(#{1,4})\s+(.+)/);
+    const numbered = line.match(/^((?:\d+\.){0,3}\d+|chapter\s+\w+|section\s+\w+)[:.)\s-]+(.+)/i);
+    const shortHeading = line.length >= 3 && line.length <= 72 && !/[.!?]$/.test(line) && (/^[A-Z][A-Za-z0-9 '&:/_-]+$/.test(line) || line === line.toUpperCase());
+    if (markdown || numbered || shortHeading) {
+      const title = (markdown?.[2] || line.replace(/^#+\s*/, '')).trim();
+      if (title && !items.some(item => item.title.toLowerCase() === title.toLowerCase())) {
+        items.push({ title, page: items.length + 1, level: markdown ? Math.min(markdown[1].length, 3) : (numbered ? 2 : 1), position: offset });
+      }
+    }
+    offset += rawLine.length + 1;
+  });
+  if (!items.length) {
+    const paragraphs = text.split(/\n\s*\n/).filter(part => part.trim());
+    let searchFrom = 0;
+    paragraphs.slice(0, 16).forEach((paragraph, index) => {
+      const clean = paragraph.replace(/\s+/g, ' ').trim();
+      const position = text.indexOf(paragraph, searchFrom);
+      searchFrom = Math.max(searchFrom, position + paragraph.length);
+      items.push({ title: clean.slice(0, 58) + (clean.length > 58 ? '…' : ''), page: index + 1, level: 2, position: Math.max(0, position) });
+    });
+  }
+  return items.slice(0, 30);
+}
+
+function renderTextDocumentOutline(items) {
+  const list = document.getElementById('outline-list');
+  const kindElement = document.getElementById('document-kind');
+  const editor = document.getElementById('text-document-editor');
+  if (!list || !kindElement || !editor) return;
+  const typeLabel = activeDocumentType === 'docx' ? 'Word document' : 'Editable document';
+  kindElement.innerHTML = `<span class="kind-icon">⌘</span><span><strong>${typeLabel}</strong><small>Mapped locally · ${items.length} sections</small></span>`;
+  list.innerHTML = '';
+  items.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.className = `outline-item level-${item.level || 2}`;
+    button.innerHTML = `<span class="outline-index">${String(index + 1).padStart(2, '0')}</span><span class="outline-label">${escapeHtml(item.title)}</span>`;
+    button.addEventListener('click', () => {
+      editor.focus();
+      editor.setSelectionRange(item.position || 0, item.position || 0);
+      const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 24;
+      editor.scrollTop = Math.max(0, (activeDocumentText.slice(0, item.position || 0).split('\n').length - 3) * lineHeight);
+      list.querySelectorAll('.outline-item').forEach(node => node.classList.remove('active'));
+      button.classList.add('active');
+    });
+    list.appendChild(button);
+  });
+}
+
+async function initializeTextRag(text) {
+  if (!activeDocumentId) return null;
+  setRagStatus('indexing', 'Indexing this document locally…');
+  const chunks = chunkPageText(text, 1, 165, 35).map((chunk, index) => ({ ...chunk, page: index + 1 }));
+  const documentFrequency = {};
+  let totalLength = 0;
+  chunks.forEach((chunk, id) => {
+    chunk.id = id;
+    const tokens = tokenizeForRag(chunk.text);
+    chunk.terms = {};
+    tokens.forEach(token => { chunk.terms[token] = (chunk.terms[token] || 0) + 1; });
+    chunk.length = tokens.length;
+    totalLength += tokens.length;
+    Object.keys(chunk.terms).forEach(token => { documentFrequency[token] = (documentFrequency[token] || 0) + 1; });
+  });
+  currentRagIndex = {
+    documentId: activeDocumentId,
+    version: 3,
+    pageCount: 1,
+    chunks,
+    documentFrequency,
+    averageLength: totalLength / Math.max(chunks.length, 1),
+    createdAt: Date.now()
+  };
+  await addLocalEmbeddingsIfAvailable(currentRagIndex);
+  await saveRagIndex(currentRagIndex);
+  setRagStatus('ready', `Local RAG ready · ${chunks.length} passages`);
+  return currentRagIndex;
+}
+
+async function openTextDocument(record) {
+  if (pageObserver) pageObserver.disconnect();
+  pdfDoc = null;
+  pdfPagesCount = 0;
+  currentPageNum = 1;
+  if (record.contentText != null) {
+    activeDocumentText = record.contentText;
+  } else if (activeDocumentType === 'docx') {
+    activeDocumentText = (await mammoth.extractRawText({ arrayBuffer: record.arrayBuffer })).value;
+  } else {
+    activeDocumentText = new TextDecoder('utf-8').decode(record.arrayBuffer);
+  }
+  currentDocumentAnalysisText = activeDocumentText.slice(0, 60000);
+  currentDocumentKind = activeDocumentType === 'docx' ? 'document' : (['md', 'markdown'].includes(activeDocumentType) ? 'article' : 'document');
+  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText);
+  document.getElementById('app').classList.add('text-document-mode');
+  document.getElementById('pdf-scroll-container').style.display = 'none';
+  document.getElementById('text-document-container').style.display = 'flex';
+  const editor = document.getElementById('text-document-editor');
+  editor.value = activeDocumentText;
+  editor.spellcheck = !['json', 'js', 'jsx', 'ts', 'tsx', 'py', 'java', 'c', 'cpp', 'swift', 'go', 'rs', 'sh', 'css', 'html', 'xml'].includes(activeDocumentType);
+  document.getElementById('text-document-badge').textContent = documentTypeLabel(record.fileName);
+  document.getElementById('text-document-status').textContent = 'Saved locally';
+  renderTextDocumentOutline(currentDocumentOutline);
+  ragBuildPromise = initializeTextRag(activeDocumentText);
+}
+
+async function saveTextDocumentChanges() {
+  if (!activeDocumentId || activeDocumentType === 'pdf') return;
+  const editor = document.getElementById('text-document-editor');
+  const status = document.getElementById('text-document-status');
+  const record = await getLibraryDocument(activeDocumentId);
+  if (!record || !editor) return;
+  activeDocumentText = editor.value;
+  const isWordSource = activeDocumentType === 'docx';
+  const encoded = isWordSource ? record.arrayBuffer : new TextEncoder().encode(activeDocumentText).buffer;
+  await saveLibraryDocument({ ...record, arrayBuffer: encoded, contentText: activeDocumentText, size: encoded.byteLength, updatedAt: Date.now() });
+  currentDocumentAnalysisText = activeDocumentText.slice(0, 60000);
+  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText);
+  renderTextDocumentOutline(currentDocumentOutline);
+  currentRagIndex = null;
+  ragBuildPromise = initializeTextRag(activeDocumentText);
+  status.textContent = isWordSource ? 'Editable local text copy saved' : 'Saved locally';
+  await renderLibrary();
+  saveSessionToCloud();
+}
+
+function initTextDocumentEditor() {
+  const editor = document.getElementById('text-document-editor');
+  const status = document.getElementById('text-document-status');
+  const save = debounce(saveTextDocumentChanges, 900);
+  editor?.addEventListener('input', () => {
+    activeDocumentText = editor.value;
+    if (status) status.textContent = 'Editing…';
+    save();
+  });
+  document.getElementById('btn-save-document')?.addEventListener('click', saveTextDocumentChanges);
+  document.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's' && activeDocumentType !== 'pdf') {
+      event.preventDefault();
+      saveTextDocumentChanges();
+    }
+  });
+}
+
 function initUploads() {
   const headerUpload = document.getElementById('pdf-upload');
   const welcomeUpload = document.getElementById('pdf-upload-welcome');
   const sampleBtn = document.getElementById('btn-load-sample');
   
-  const handleFile = (e) => {
-    const file = e.target.files[0];
-    if (file && file.type === 'application/pdf') {
-      loadLocalPdfFile(file);
+  const handleFile = async (e) => {
+    const files = [...e.target.files];
+    for (const file of files) {
+      await importDocumentToLibrary(file);
     }
+    e.target.value = '';
   };
   
   headerUpload.addEventListener('change', handleFile);
@@ -1114,10 +1791,9 @@ function initUploads() {
         return res.arrayBuffer();
       })
       .then(async (arrayBuffer) => {
-        const typedarray = new Uint8Array(arrayBuffer);
-        loadPdfDoc(typedarray);
-        await savePdfToIndexedDB(arrayBuffer, 'sample.pdf');
-        await uploadPdfToCloud(arrayBuffer, 'sample.pdf');
+        const id = createDocumentId('Understanding Computing.pdf', arrayBuffer.byteLength, 2024);
+        await saveLibraryDocument({ id, arrayBuffer, fileName: 'Understanding Computing.pdf', size: arrayBuffer.byteLength, updatedAt: Date.now() });
+        await openLibraryDocument(id);
       })
       .catch(err => {
         console.error("Failed to load sample", err);
@@ -1125,6 +1801,36 @@ function initUploads() {
         loadPdfDoc(sampleUrl);
       });
   });
+}
+
+async function importDocumentToLibrary(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const extension = documentExtension(file.name);
+  let contentText = '';
+  if (extension !== 'pdf') {
+    try {
+      contentText = extension === 'docx'
+        ? (await mammoth.extractRawText({ arrayBuffer })).value
+        : new TextDecoder('utf-8').decode(arrayBuffer);
+    } catch (error) {
+      addSystemChatMessage(`Could not read ${escapeHtml(file.name)}: ${escapeHtml(error.message)}`, 'error');
+      return;
+    }
+  }
+  const id = createDocumentId(file.name, file.size, file.lastModified);
+  await saveLibraryDocument({
+    id,
+    arrayBuffer,
+    fileName: file.name,
+    size: file.size,
+    mimeType: file.type || 'application/octet-stream',
+    contentText,
+    updatedAt: Date.now()
+  });
+  if (extension === 'pdf') await savePdfToIndexedDB(arrayBuffer, file.name);
+  await uploadPdfToCloud(arrayBuffer, file.name, id);
+  await renderLibrary();
+  await openLibraryDocument(id);
 }
 
 function loadLocalPdfFile(file) {
@@ -1141,7 +1847,7 @@ function loadLocalPdfFile(file) {
     const typedarray = new Uint8Array(arrayBuffer);
     loadPdfDoc(typedarray);
     await savePdfToIndexedDB(arrayBuffer, file.name);
-    await uploadPdfToCloud(arrayBuffer, file.name);
+    await uploadPdfToCloud(arrayBuffer, file.name, activeDocumentId);
   };
   fileReader.readAsArrayBuffer(file);
 }
@@ -1164,8 +1870,6 @@ async function loadPdfDoc(pdfSource) {
     
     document.getElementById('page-count').textContent = pdfPagesCount;
     document.getElementById('page-number-input').max = pdfPagesCount;
-    
-    addSystemChatMessage(`Successfully loaded <strong>${pdfPagesCount}</strong> pages. Rendering workspace...`, "success");
     
     // Pre-create container nodes for scroll heights
     for (let pageNum = 1; pageNum <= pdfPagesCount; pageNum++) {
@@ -1193,6 +1897,13 @@ async function loadPdfDoc(pdfSource) {
         jumpToPage(currentPageNum);
       }, 500);
     }
+
+    if (!currentDocumentOutline.length) {
+      analyzeDocumentLocally();
+    } else {
+      renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+    }
+    ragBuildPromise = initializeLocalRag();
     
   } catch (err) {
     console.error("PDF load failure", err);
@@ -1200,6 +1911,452 @@ async function loadPdfDoc(pdfSource) {
     // Show welcome screen again
     document.getElementById('welcome-screen').style.display = 'flex';
     document.getElementById('pdf-scroll-container').style.display = 'none';
+  }
+}
+
+const RAG_STOP_WORDS = new Set(`a an and are as at be been being but by can could did do does doing for from had has have having he her here hers herself him himself his how i if in into is it its itself may me might more most must my myself no nor not of on once only or other our ours ourselves out over own same she should so some such than that the their theirs them themselves then there these they this those through to too under until up very was we were what when where which while who whom why will with would you your yours yourself yourselves`.split(' '));
+
+function normalizeRagToken(token) {
+  let value = token.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!value || RAG_STOP_WORDS.has(value) || value.length < 2) return '';
+  if (value.length > 5 && value.endsWith('ing')) value = value.slice(0, -3);
+  else if (value.length > 4 && value.endsWith('ed')) value = value.slice(0, -2);
+  else if (value.length > 4 && value.endsWith('es')) value = value.slice(0, -2);
+  else if (value.length > 3 && value.endsWith('s')) value = value.slice(0, -1);
+  return value;
+}
+
+function tokenizeForRag(text) {
+  return (text.match(/[A-Za-z0-9][A-Za-z0-9_'-]*/g) || []).map(normalizeRagToken).filter(Boolean);
+}
+
+function chunkPageText(text, page, targetWords = 165, overlapWords = 35) {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const chunks = [];
+  if (!words.length) return chunks;
+  for (let start = 0; start < words.length; start += targetWords - overlapWords) {
+    const slice = words.slice(start, start + targetWords);
+    if (slice.length < 25 && chunks.length) break;
+    chunks.push({ page, text: slice.join(' '), position: start });
+    if (start + targetWords >= words.length) break;
+  }
+  return chunks;
+}
+
+function setRagStatus(state, text) {
+  let status = document.getElementById('rag-status');
+  if (!status) {
+    status = document.createElement('div');
+    status.id = 'rag-status';
+    const shortcuts = document.querySelector('.chat-shortcuts');
+    shortcuts?.parentNode.insertBefore(status, shortcuts);
+  }
+  if (!status) return;
+  status.className = `rag-status ${state}`;
+  status.innerHTML = `<i></i><span>${escapeHtml(text)}</span>`;
+}
+
+async function initializeLocalRag() {
+  if (!activeDocumentId || !pdfDoc) return null;
+  setRagStatus('indexing', `Indexing ${pdfPagesCount} pages locally…`);
+  try {
+    const saved = await getRagIndex(activeDocumentId);
+    if (saved?.version === 2 && saved.pageCount === pdfPagesCount) {
+      currentRagIndex = saved;
+      setRagStatus('ready', `${saved.embeddings?.length ? 'Hybrid RAG' : 'Local RAG'} ready · ${saved.chunks.length} passages`);
+      return saved;
+    }
+
+    const chunks = [];
+    for (let pageNumber = 1; pageNumber <= pdfPagesCount; pageNumber++) {
+      const page = await pdfDoc.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items.map(item => item.str).join(' ').replace(/\s+/g, ' ').trim();
+      chunks.push(...chunkPageText(text, pageNumber));
+      if (pageNumber % 8 === 0) {
+        setRagStatus('indexing', `Indexing locally · ${pageNumber}/${pdfPagesCount} pages`);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    const documentFrequency = {};
+    let totalLength = 0;
+    chunks.forEach((chunk, id) => {
+      chunk.id = id;
+      const tokens = tokenizeForRag(chunk.text);
+      const termFrequency = {};
+      tokens.forEach(token => { termFrequency[token] = (termFrequency[token] || 0) + 1; });
+      chunk.terms = termFrequency;
+      chunk.length = tokens.length;
+      totalLength += tokens.length;
+      Object.keys(termFrequency).forEach(token => { documentFrequency[token] = (documentFrequency[token] || 0) + 1; });
+    });
+    currentRagIndex = {
+      documentId: activeDocumentId,
+      version: 2,
+      pageCount: pdfPagesCount,
+      chunks,
+      documentFrequency,
+      averageLength: totalLength / Math.max(chunks.length, 1),
+      createdAt: Date.now()
+    };
+    await addLocalEmbeddingsIfAvailable(currentRagIndex);
+    await saveRagIndex(currentRagIndex);
+    const mode = currentRagIndex.embeddings?.length ? 'Hybrid RAG' : 'Local RAG';
+    setRagStatus('ready', `${mode} ready · ${chunks.length} passages`);
+    return currentRagIndex;
+  } catch (error) {
+    console.error('Local RAG indexing failed', error);
+    setRagStatus('error', 'Local document memory unavailable');
+    return null;
+  }
+}
+
+async function addLocalEmbeddingsIfAvailable(index) {
+  try {
+    const response = await ollamaFetch('/api/tags', { signal: AbortSignal.timeout(1800) });
+    if (!response.ok) return;
+    const data = await response.json();
+    const embeddingModel = (data.models || []).find(model => /(^|[-_:])(embed|embedding)|nomic-embed/i.test(model.name));
+    if (!embeddingModel) return;
+    index.embeddingModel = embeddingModel.name;
+    index.embeddings = [];
+    for (let start = 0; start < index.chunks.length; start += 24) {
+      setRagStatus('indexing', `Building local semantic memory · ${Math.min(start + 24, index.chunks.length)}/${index.chunks.length}`);
+      const batch = index.chunks.slice(start, start + 24).map(chunk => chunk.text);
+      const embedResponse = await ollamaFetch('/api/embed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: embeddingModel.name, input: batch, truncate: true })
+      });
+      if (!embedResponse.ok) throw new Error('Embedding model request failed');
+      const embedData = await embedResponse.json();
+      index.embeddings.push(...(embedData.embeddings || []));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    if (index.embeddings.length !== index.chunks.length) {
+      delete index.embeddings;
+      delete index.embeddingModel;
+    }
+  } catch (error) {
+    delete index.embeddings;
+    delete index.embeddingModel;
+    console.info('Local embedding enhancement unavailable; using BM25 retrieval.', error.message);
+  }
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  const length = Math.min(a?.length || 0, b?.length || 0);
+  for (let index = 0; index < length; index++) {
+    dot += a[index] * b[index];
+    normA += a[index] * a[index];
+    normB += b[index] * b[index];
+  }
+  return normA && normB ? dot / Math.sqrt(normA * normB) : 0;
+}
+
+async function embedRagQuery(query) {
+  if (!currentRagIndex?.embeddingModel) return null;
+  try {
+    const response = await ollamaFetch('/api/embed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: currentRagIndex.embeddingModel, input: query, truncate: true })
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.embeddings?.[0] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function retrieveDocumentContext(query, limit = 6) {
+  if (!currentRagIndex?.chunks?.length) return [];
+  const queryTokens = tokenizeForRag(query);
+  const uniqueTerms = [...new Set(queryTokens)];
+  const { chunks, documentFrequency, averageLength } = currentRagIndex;
+  const totalChunks = chunks.length;
+  const normalizedQuery = query.toLowerCase().replace(/\s+/g, ' ').trim();
+  const queryEmbedding = await embedRagQuery(query);
+  const scored = chunks.map(chunk => {
+    let score = 0;
+    uniqueTerms.forEach(term => {
+      const tf = chunk.terms[term] || 0;
+      if (!tf) return;
+      const df = documentFrequency[term] || 0;
+      const idf = Math.log(1 + (totalChunks - df + .5) / (df + .5));
+      const denominator = tf + 1.35 * (.25 + .75 * chunk.length / Math.max(averageLength, 1));
+      score += idf * ((tf * 2.35) / denominator);
+    });
+    const lowerText = chunk.text.toLowerCase();
+    if (normalizedQuery.length > 8 && lowerText.includes(normalizedQuery)) score += 8;
+    const coverage = uniqueTerms.filter(term => chunk.terms[term]).length / Math.max(uniqueTerms.length, 1);
+    score += coverage * 2.5;
+    if (queryEmbedding && currentRagIndex.embeddings?.[chunk.id]) {
+      score += Math.max(0, cosineSimilarity(queryEmbedding, currentRagIndex.embeddings[chunk.id])) * 4;
+    }
+    if (chunk.page === currentPageNum) score += .25;
+    return { ...chunk, score };
+  }).sort((a, b) => b.score - a.score);
+
+  let selected = scored.filter(item => item.score > .12).slice(0, limit);
+  if (!selected.length) selected = scored.slice(0, 3);
+  if (/\b(summary|summarize|overview|about|main idea|thesis)\b/i.test(query)) {
+    selected = [...chunks.slice(0, 2).map(chunk => ({ ...chunk, score: 1 })), ...selected];
+  }
+  const unique = new Map();
+  selected.forEach(item => unique.set(item.id, item));
+  return [...unique.values()].slice(0, limit);
+}
+
+function buildRagPrompt(question, passages) {
+  const isPdf = activeDocumentType === 'pdf';
+  const location = isPdf ? 'Page' : 'Passage';
+  const context = passages.map(item => `[${location} ${item.page}]\n${item.text}`).join('\n\n---\n\n');
+  return `You are a document-grounded study assistant answering only about the currently open document: "${activeDocumentName}". Answer the question using only the retrieved passages below.
+
+Rules:
+- Base factual claims on the passages. Do not invent missing details.
+- Never use facts from a different document or previous workspace.
+- Cite supporting ${isPdf ? 'pages inline as [p. N]' : 'passages inline as [passage N]'}.
+- If the passages do not contain enough information, say what is missing.
+- Explain clearly for a student. Use short headings or bullets only when helpful.
+- ${isPdf ? 'A rendered image of the currently visible PDF page may be attached. Use it for diagrams, tables, equations, and visual layout, while citing that page.' : 'The source is editable text; respect its current locally saved contents.'}
+- The document is classified as a ${currentDocumentKind}.
+
+Question: ${question}
+
+Retrieved passages:
+${context}`;
+}
+
+function addRagAssistantMessage(text, passages) {
+  addChatMessage('assistant', text);
+  const container = document.getElementById('chat-messages');
+  const bubble = container.lastElementChild;
+  if (!bubble || !passages.length) return;
+  const sources = document.createElement('div');
+  sources.className = 'rag-sources';
+  const pages = [...new Set(passages.map(item => item.page))].slice(0, 6);
+  const prefix = activeDocumentType === 'pdf' ? 'p.' : 'passage';
+  sources.innerHTML = `<span>Sources</span>${pages.map(page => `<button data-page="${page}">${prefix} ${page}</button>`).join('')}`;
+  if (activeDocumentType === 'pdf') {
+    sources.querySelectorAll('button').forEach(button => button.addEventListener('click', () => jumpToPage(Number(button.dataset.page))));
+  }
+  bubble.appendChild(sources);
+}
+
+function initDocumentOutline() {
+  const outline = document.getElementById('document-outline');
+  const hideButton = document.getElementById('btn-outline-collapse');
+  const showButton = document.getElementById('btn-outline-reveal');
+  hideButton?.addEventListener('click', () => outline?.classList.add('collapsed'));
+  showButton?.addEventListener('click', () => outline?.classList.remove('collapsed'));
+  document.getElementById('btn-enhance-outline')?.addEventListener('click', enhanceOutlineWithAI);
+}
+
+function median(values) {
+  if (!values.length) return 12;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function classifyDocument(text, pageCount) {
+  const normalized = text.toLowerCase();
+  if (/\babstract\b/.test(normalized) && /\b(references|bibliography)\b/.test(normalized)) return 'research paper';
+  if (/\b(chapter\s+(\d+|[ivxlcdm]+)|textbook|study guide|cram book|table of contents)\b/.test(normalized) || pageCount >= 28) return 'book';
+  if (/\bposted (on|by)\b|\bmin read\b|\bblog\b/.test(normalized)) return 'blog';
+  if (pageCount <= 16) return 'article';
+  return 'document';
+}
+
+async function extractEmbeddedPdfOutline() {
+  const outline = await pdfDoc.getOutline();
+  if (!outline?.length) return [];
+  const items = [];
+  async function visit(nodes, level = 1) {
+    for (const node of nodes) {
+      let destination = node.dest;
+      if (typeof destination === 'string') destination = await pdfDoc.getDestination(destination);
+      const pageRef = Array.isArray(destination) ? destination[0] : null;
+      let page = null;
+      if (pageRef && typeof pageRef === 'object') {
+        try { page = (await pdfDoc.getPageIndex(pageRef)) + 1; } catch (_) {}
+      } else if (Number.isInteger(pageRef)) {
+        page = pageRef + 1;
+      }
+      const title = (node.title || '').replace(/\s+/g, ' ').trim();
+      if (title && page && page <= pdfPagesCount) {
+        items.push({ title, page, level: Math.min(level, 3), source: 'pdf-outline' });
+      }
+      if (node.items?.length) await visit(node.items, level + 1);
+    }
+  }
+  await visit(outline);
+  return items;
+}
+
+async function analyzeDocumentLocally() {
+  if (!pdfDoc) return;
+  const kindElement = document.getElementById('document-kind');
+  const list = document.getElementById('outline-list');
+  if (list) list.innerHTML = '<div class="outline-loading"><i></i><span>Reading structure locally…</span></div>';
+  if (kindElement) kindElement.classList.add('analyzing');
+
+  // Author-provided bookmarks are the highest-quality source of chapter
+  // structure and avoid treating bold body text as headings.
+  try {
+    const embeddedOutline = await extractEmbeddedPdfOutline();
+    if (embeddedOutline.length) {
+      const sampleText = [];
+      for (let pageNumber = 1; pageNumber <= Math.min(pdfPagesCount, 8); pageNumber++) {
+        const page = await pdfDoc.getPage(pageNumber);
+        const content = await page.getTextContent();
+        sampleText.push(content.items.map(item => item.str).join(' '));
+      }
+      currentDocumentAnalysisText = sampleText.join('\n').slice(0, 24000);
+      currentDocumentKind = classifyDocument(currentDocumentAnalysisText, pdfPagesCount);
+      if (embeddedOutline.some(item => /^(chapter|part|introduction)\b/i.test(item.title))) currentDocumentKind = 'book';
+      currentDocumentOutline = embeddedOutline.slice(0, 60);
+      renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+      saveActiveDocumentSession();
+      return;
+    }
+  } catch (error) {
+    console.info('No usable embedded PDF outline; using local typography analysis.', error.message);
+  }
+
+  const pages = [];
+  const fontSizes = [];
+  const pageLimit = Math.min(pdfPagesCount, 60);
+  for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber++) {
+    const page = await pdfDoc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const rows = new Map();
+    content.items.forEach(item => {
+      const text = item.str.trim();
+      if (!text) return;
+      const y = Math.round((item.transform?.[5] || 0) / 3) * 3;
+      const size = Math.max(1, Math.abs(item.transform?.[3] || item.height || 10));
+      fontSizes.push(size);
+      if (!rows.has(y)) rows.set(y, []);
+      rows.get(y).push({ text, x: item.transform?.[4] || 0, size });
+    });
+    const lines = [...rows.entries()].sort((a, b) => b[0] - a[0]).map(([, items]) => ({
+      text: items.sort((a, b) => a.x - b.x).map(item => item.text).join(' ').replace(/\s+/g, ' ').trim(),
+      size: Math.max(...items.map(item => item.size))
+    }));
+    pages.push({ page: pageNumber, lines, text: lines.map(line => line.text).join(' ') });
+  }
+
+  const sizeFrequency = new Map();
+  fontSizes.filter(size => size < 40).forEach(size => {
+    const rounded = Math.round(size * 2) / 2;
+    sizeFrequency.set(rounded, (sizeFrequency.get(rounded) || 0) + 1);
+  });
+  const baseSize = [...sizeFrequency.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || median(fontSizes.filter(size => size < 40));
+  const allText = pages.map(page => page.text).join('\n');
+  currentDocumentAnalysisText = allText.slice(0, 24000);
+  currentDocumentKind = classifyDocument(allText, pdfPagesCount);
+  const repeated = new Map();
+  pages.forEach(page => page.lines.forEach(line => {
+    const key = line.text.toLowerCase().replace(/\d+/g, '#');
+    repeated.set(key, (repeated.get(key) || 0) + 1);
+  }));
+  const structuralPattern = /^(chapter|part|section|unit|lesson|module|appendix|introduction|abstract|overview|conclusion|discussion|results|methodology|methods|references|bibliography)\b/i;
+  const numberedPattern = /^(\d+(?:\.\d+){0,3}|[IVXLC]+)[.)]?\s+[A-Z]/;
+  const candidates = [];
+  pages.forEach(page => page.lines.forEach((line, lineIndex) => {
+    const text = line.text.replace(/^[-•]\s*/, '').trim();
+    if (text.length < 3 || text.length > 105 || /^\d+$/.test(text)) return;
+    const wordCount = text.split(/\s+/).length;
+    const repeatCount = repeated.get(text.toLowerCase().replace(/\d+/g, '#')) || 0;
+    const isStructural = structuralPattern.test(text) || numberedPattern.test(text);
+    const isLarge = line.size >= baseSize * 1.32;
+    const looksTitle = /^[A-Z][^.!?]{2,80}$/.test(text) && text.split(/\s+/).length <= 12;
+    const words = text.split(/\s+/).filter(Boolean);
+    const titleCaseRatio = words.filter(word => /^[A-Z0-9]/.test(word)).length / Math.max(words.length, 1);
+    if (!isStructural && !numberedPattern.test(text) && !/^[A-Z]/.test(text)) return;
+    if (!isStructural && !numberedPattern.test(text) && titleCaseRatio < .45) return;
+    if ((isStructural || wordCount >= 2) && (isStructural || numberedPattern.test(text) || isLarge || (lineIndex < 4 && looksTitle && line.size >= baseSize * 1.18)) && repeatCount <= 2) {
+      const score = (isStructural ? 5 : 0) + (isLarge ? Math.min(4, line.size / baseSize) : 0) + (lineIndex < 4 ? 1 : 0);
+      let level = 2;
+      if (/^(part|chapter|unit|introduction|conclusion|appendix)\b/i.test(text)) level = 1;
+      else if (/^\d+\.\d+\.\d+/.test(text)) level = 3;
+      candidates.push({ title: text, page: page.page, level, score, order: lineIndex });
+    }
+  }));
+
+  const seen = new Set();
+  currentDocumentOutline = candidates
+    .sort((a, b) => a.page - b.page || a.order - b.order)
+    .filter(item => {
+      const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 26);
+
+  if (currentDocumentOutline.length < 2) {
+    currentDocumentOutline = pages.map(page => {
+      const line = page.lines.find(item => item.text.length >= 5 && item.text.length <= 80);
+      return line ? { title: line.text, page: page.page, level: 2 } : null;
+    }).filter(Boolean).slice(0, 24);
+  }
+  renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+  saveActiveDocumentSession();
+}
+
+function renderDocumentOutline(items, kind) {
+  const list = document.getElementById('outline-list');
+  const kindElement = document.getElementById('document-kind');
+  if (!list || !kindElement) return;
+  kindElement.classList.remove('analyzing');
+  const labels = { book: ['▤', 'Book'], article: ['◫', 'Article'], blog: ['◎', 'Blog'], 'research paper': ['⌁', 'Research paper'], document: ['◇', 'Document'] };
+  const [icon, label] = labels[kind] || labels.document;
+  kindElement.innerHTML = `<span class="kind-icon">${icon}</span><span><strong>${label}</strong><small>Mapped locally · ${pdfPagesCount} pages</small></span>`;
+  list.innerHTML = '';
+  items.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.className = `outline-item level-${item.level || 2}`;
+    button.innerHTML = `<span class="outline-index">${String(index + 1).padStart(2, '0')}</span><span class="outline-label">${escapeHtml(item.title)}</span><span class="outline-page">${item.page}</span>`;
+    button.addEventListener('click', () => {
+      jumpToPage(item.page);
+      list.querySelectorAll('.outline-item').forEach(node => node.classList.remove('active'));
+      button.classList.add('active');
+    });
+    list.appendChild(button);
+  });
+}
+
+async function enhanceOutlineWithAI() {
+  const button = document.getElementById('btn-enhance-outline');
+  if (aiProvider === 'demo') {
+    document.getElementById('settings-dialog')?.showModal();
+    return;
+  }
+  button.disabled = true;
+  button.innerHTML = '<span>✦</span> Refining map…';
+  try {
+    const prompt = `Classify this document and improve its navigation outline. Return ONLY JSON in this shape: {"kind":"book|article|blog|research paper|document","outline":[{"title":"...","page":1,"level":1}]}. Preserve accurate page numbers from the local candidates.\n\nLocal candidates: ${JSON.stringify(currentDocumentOutline)}\n\nDocument excerpt:\n${currentDocumentAnalysisText.slice(0, 12000)}`;
+    const response = await fetchConfiguredAI(prompt);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    if (Array.isArray(parsed.outline) && parsed.outline.length) {
+      currentDocumentKind = parsed.kind || currentDocumentKind;
+      currentDocumentOutline = parsed.outline.filter(item => item.title && Number.isFinite(Number(item.page))).map(item => ({ ...item, page: Number(item.page) })).slice(0, 40);
+      renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+      saveActiveDocumentSession();
+    }
+  } catch (error) {
+    addSystemChatMessage(`Could not refine the document map: ${error.message}`, 'warning');
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<span>✦</span> Refine map with AI';
   }
 }
 
@@ -1623,8 +2780,8 @@ function initFloatingToolbar() {
       
       const resultSec = document.getElementById('toolbar-result-section');
       if (resultSec && resultSec.style.display === 'none') {
-        const toolbarWidth = 390;
-        const toolbarHeight = 110;
+        const toolbarWidth = 430;
+        const toolbarHeight = 154;
         
         let left = e.clientX - toolbarWidth / 2;
         let top = e.clientY - toolbarHeight - 10;
@@ -1639,14 +2796,15 @@ function initFloatingToolbar() {
         
         toolbar.style.left = `${left}px`;
         toolbar.style.top = `${top}px`;
+        toolbar.style.setProperty('--toolbar-origin-x', `${Math.max(24, Math.min(toolbarWidth - 24, e.clientX - left))}px`);
         toolbar.style.display = 'flex';
       }
     }
   });
   
   function positionToolbar(selectionRect) {
-    const toolbarWidth = 390; // Expanded width for highlights & format actions
-    const toolbarHeight = 110;
+    const toolbarWidth = 430;
+    const toolbarHeight = 154;
     
     let left = selectionRect.left + (selectionRect.width / 2) - (toolbarWidth / 2);
     let top = selectionRect.top - toolbarHeight - 10;
@@ -1661,6 +2819,7 @@ function initFloatingToolbar() {
     
     toolbar.style.left = `${left}px`;
     toolbar.style.top = `${top}px`;
+    toolbar.style.setProperty('--toolbar-origin-x', `${toolbarWidth / 2}px`);
     toolbar.style.display = 'flex';
   }
   
@@ -1958,6 +3117,8 @@ async function runInlineAICommand(command, targetText) {
     if (aiProvider === 'gemini') {
       if (!geminiApiKey) throw new Error("Gemini API Key is missing. Add it in the settings.");
       resultText = await fetchGeminiAPI(systemPrompt);
+    } else if (aiProvider === 'openai-compatible') {
+      resultText = await fetchOpenAICompatibleAPI(systemPrompt);
     } else if (aiProvider === 'ollama') {
       resultText = await fetchOllamaAPI(systemPrompt);
     } else {
@@ -2055,6 +3216,17 @@ function initNotesEditor() {
   const writeBtn = document.getElementById('editor-btn-write');
   const previewBtn = document.getElementById('editor-btn-preview');
   const previewDiv = document.getElementById('notes-preview');
+  const outputStyleSelect = document.getElementById('note-output-style');
+  const cheatSheetBtn = document.getElementById('btn-export-cheatsheet');
+
+  if (outputStyleSelect) {
+    outputStyleSelect.value = localStorage.getItem('study_notes_style') || 'typeset';
+    outputStyleSelect.addEventListener('change', () => {
+      localStorage.setItem('study_notes_style', outputStyleSelect.value);
+      previewDiv?.classList.toggle('handwritten-preview', outputStyleSelect.value === 'handwritten');
+      if (previewBtn?.classList.contains('active')) previewBtn.click();
+    });
+  }
   
   if (writeBtn && previewBtn && previewDiv) {
     writeBtn.addEventListener('click', () => {
@@ -2070,6 +3242,7 @@ function initNotesEditor() {
       writeBtn.classList.remove('active');
       notesTextarea.style.display = 'none';
       previewDiv.style.display = '';
+      previewDiv.classList.toggle('handwritten-preview', outputStyleSelect?.value === 'handwritten');
       
       const text = notesTextarea.value;
       previewDiv.innerHTML = convertMarkdownToHtml(text) || '<p style="color:var(--text-muted); font-style:italic;">No notes written yet...</p>';
@@ -2096,6 +3269,8 @@ function initNotesEditor() {
   document.getElementById('editor-btn-bold').addEventListener('click', () => insertFormat('**'));
   document.getElementById('editor-btn-italic').addEventListener('click', () => insertFormat('*'));
   document.getElementById('editor-btn-header').addEventListener('click', () => insertFormat('\n# '));
+  document.getElementById('editor-btn-inline-math')?.addEventListener('click', () => insertFormat('$'));
+  document.getElementById('editor-btn-display-math')?.addEventListener('click', () => insertDisplayMath());
   
   function insertFormat(wrapper) {
     const startPos = notesTextarea.selectionStart;
@@ -2117,12 +3292,28 @@ function initNotesEditor() {
     
     // Trigger save
     localStorage.setItem('study_notes', notesTextarea.value);
+    saveActiveDocumentSession();
+    saveSessionToCloud();
+  }
+
+  function insertDisplayMath() {
+    const startPos = notesTextarea.selectionStart;
+    const endPos = notesTextarea.selectionEnd;
+    const selected = notesTextarea.value.substring(startPos, endPos) || '\\frac{a}{b}';
+    const replacement = `\n$$\n${selected}\n$$\n`;
+    notesTextarea.setRangeText(replacement, startPos, endPos, 'end');
+    notesTextarea.focus();
+    localStorage.setItem('study_notes', notesTextarea.value);
+    saveActiveDocumentSession();
+    saveSessionToCloud();
   }
   
   clearBtn.addEventListener('click', () => {
     if (confirm("Are you sure you want to clear your study workspace notes? This will clear local memory, though connected file content on disk remains unchanged.")) {
       notesTextarea.value = '';
       localStorage.removeItem('study_notes');
+      saveActiveDocumentSession();
+      saveSessionToCloud();
     }
   });
   
@@ -2140,7 +3331,11 @@ function initNotesEditor() {
     exportDocxBtn.addEventListener('click', () => {
       const text = notesTextarea.value;
       const htmlContent = convertMarkdownToHtml(text);
-      const blob = new Blob(['\ufeff' + htmlContent], { type: 'application/msword' });
+      const fontFamily = outputStyleSelect?.value === 'handwritten'
+        ? '"Bradley Hand", "Noteworthy", "Marker Felt", cursive'
+        : '"Iowan Old Style", Georgia, serif';
+      const styledDocument = `<html><head><meta charset="utf-8"></head><body style="font-family:${fontFamily};line-height:1.65;color:#242323">${htmlContent}</body></html>`;
+      const blob = new Blob(['\ufeff' + styledDocument], { type: 'application/msword' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'study_notes.doc';
@@ -2149,101 +3344,55 @@ function initNotesEditor() {
   }
   
   const exportPdfBtn = document.getElementById('btn-export-pdf');
-  if (exportPdfBtn) {
-    exportPdfBtn.addEventListener('click', () => {
+  async function exportNotesPdf(mode = 'notes', triggerButton = exportPdfBtn) {
       const text = notesTextarea.value;
-      const htmlContent = convertMarkdownToHtml(text);
+      const cleanDocumentName = activeDocumentName || 'Study Notes';
+      const exportHtml = buildNotesExportDocument({
+        text,
+        documentName: cleanDocumentName,
+        katexCss,
+        baseHref: window.studybuddy?.isNative ? 'http://localhost:17871/' : `${location.origin}/`,
+        style: outputStyleSelect?.value || 'typeset',
+        mode
+      });
+      const outputLabel = mode === 'cheatsheet' ? 'Cheat Sheet' : 'Study Notes';
+
+      if (window.studybuddy?.exportNotesPdf) {
+        if (triggerButton) triggerButton.disabled = true;
+        showSaveStatus(mode === 'cheatsheet' ? 'Preparing cheat sheet…' : 'Preparing polished PDF…');
+        try {
+          const result = await window.studybuddy.exportNotesPdf({
+            html: exportHtml,
+            defaultName: `${cleanDocumentName.replace(/\.pdf$/i, '')} - ${outputLabel}.pdf`,
+            footerLabel: mode === 'cheatsheet' ? 'StudyBuddy Cheat Sheet' : 'StudyBuddy Notes'
+          });
+          if (result?.ok) showSaveStatus(mode === 'cheatsheet' ? 'Cheat sheet exported' : 'PDF exported');
+          else if (!result?.cancelled) showSaveStatus('PDF export failed');
+        } catch (error) {
+          console.error('Native PDF export failed', error);
+          showSaveStatus('PDF export failed');
+        } finally {
+          if (triggerButton) triggerButton.disabled = false;
+        }
+        return;
+      }
+
       const printWindow = window.open('', '_blank', 'width=800,height=600');
       if (printWindow) {
-        printWindow.document.write(`
-          <html>
-            <head>
-              <title>Study Notes - Export</title>
-              <style>
-                body {
-                  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                  line-height: 1.6;
-                  color: #333;
-                  padding: 40px;
-                  max-width: 800px;
-                  margin: 0 auto;
-                }
-                h1 {
-                  color: #111;
-                  border-bottom: 2px solid #eee;
-                  padding-bottom: 10px;
-                  font-size: 28px;
-                  margin-bottom: 20px;
-                }
-                h2 {
-                  color: #222;
-                  margin-top: 30px;
-                  font-size: 22px;
-                  margin-bottom: 15px;
-                }
-                h3 {
-                  color: #444;
-                  margin-top: 20px;
-                  font-size: 18px;
-                  margin-bottom: 10px;
-                }
-                p {
-                  margin: 0 0 1.2em;
-                }
-                code {
-                  background-color: #f4f4f4;
-                  padding: 2px 6px;
-                  border-radius: 4px;
-                  font-family: Menlo, Monaco, Consolas, monospace;
-                  font-size: 0.9em;
-                }
-                pre {
-                  background-color: #f4f4f4;
-                  padding: 15px;
-                  border-radius: 6px;
-                  overflow-x: auto;
-                  margin: 0 0 1.5em;
-                }
-                pre code {
-                  padding: 0;
-                  background-color: transparent;
-                }
-                ul, ol {
-                  margin: 0 0 1.5em;
-                  padding-left: 20px;
-                }
-                li {
-                  margin-bottom: 5px;
-                }
-                strong {
-                  font-weight: 600;
-                }
-                @media print {
-                  body {
-                    padding: 20px;
-                  }
-                  @page {
-                    margin: 2cm;
-                  }
-                }
-              </style>
-            </head>
-            <body>
-              ${htmlContent}
-              <script>
-                window.onload = function() {
-                  window.print();
-                  setTimeout(function() {
-                    window.close();
-                  }, 500);
-                };
-              </script>
-            </body>
-          </html>
-        `);
+        printWindow.document.write(exportHtml);
         printWindow.document.close();
+        printWindow.addEventListener('load', () => {
+          printWindow.print();
+          setTimeout(() => printWindow.close(), 500);
+        }, { once: true });
       }
-    });
+  }
+
+  if (exportPdfBtn) {
+    exportPdfBtn.addEventListener('click', () => exportNotesPdf('notes', exportPdfBtn));
+  }
+  if (cheatSheetBtn) {
+    cheatSheetBtn.addEventListener('click', () => exportNotesPdf('cheatsheet', cheatSheetBtn));
   }
   
   // File system API check
@@ -2252,6 +3401,98 @@ function initNotesEditor() {
     document.getElementById('file-status-text').textContent = "Real Sync Unsupported";
     document.getElementById('file-path-text').textContent = "Use standard export button below.";
   }
+}
+
+function initNotesDictation() {
+  const button = document.getElementById('btn-notes-dictation');
+  const label = document.getElementById('dictation-label');
+  const notes = document.getElementById('notes-textarea');
+  if (!button || !label || !notes || !window.studybuddy?.speechAvailable) return;
+  button.style.display = 'inline-flex';
+
+  let active = false;
+  let prefix = '';
+  let suffix = '';
+  let latestText = '';
+
+  const setState = (state, text) => {
+    button.classList.toggle('listening', state === 'listening');
+    button.classList.toggle('requesting', state === 'requesting');
+    button.classList.toggle('speech-error', state === 'error');
+    button.setAttribute('aria-pressed', String(state === 'listening' || state === 'requesting'));
+    button.setAttribute('aria-label', state === 'listening' ? 'Stop notes dictation' : 'Start notes dictation');
+    label.textContent = text;
+  };
+
+  const renderTranscript = (text) => {
+    latestText = text || '';
+    const trailingSpace = latestText && suffix && !/\s$/.test(latestText) && !/^\s/.test(suffix) ? ' ' : '';
+    notes.value = `${prefix}${latestText}${trailingSpace}${suffix}`;
+    const cursor = prefix.length + latestText.length;
+    notes.setSelectionRange(cursor, cursor);
+    notes.scrollTop = notes.scrollHeight;
+  };
+
+  const saveTranscript = () => {
+    if (!latestText) return;
+    notes.dispatchEvent(new Event('input', { bubbles: true }));
+    saveActiveDocumentSession();
+  };
+
+  const finish = (message = 'Dictate') => {
+    saveTranscript();
+    active = false;
+    setState('idle', message);
+    window.setTimeout(() => { if (!active) setState('idle', 'Dictate'); }, message === 'Dictate' ? 0 : 1800);
+  };
+
+  window.studybuddy.onSpeechEvent((event) => {
+    if (!event) return;
+    if (event.type === 'ready') {
+      active = true;
+      setState('listening', 'Listening');
+    } else if (event.type === 'partial') {
+      renderTranscript(event.text);
+      setState('listening', 'Listening');
+    } else if (event.type === 'final') {
+      renderTranscript(event.text);
+      finish('Added');
+    } else if (event.type === 'error') {
+      finish('Permission needed');
+      setState('error', 'Permission needed');
+      addSystemChatMessage(escapeHtml(event.message || 'Apple Speech could not start.'), 'warning');
+    } else if (event.type === 'stopped' && active) {
+      finish(latestText ? 'Added' : 'Dictate');
+    }
+  });
+
+  button.addEventListener('click', async () => {
+    document.getElementById('tab-btn-notes')?.click();
+    document.getElementById('editor-btn-write')?.click();
+    if (active || button.classList.contains('requesting')) {
+      await window.studybuddy.stopSpeech();
+      finish(latestText ? 'Added' : 'Dictate');
+      return;
+    }
+
+    const start = notes.selectionStart ?? notes.value.length;
+    const end = notes.selectionEnd ?? start;
+    const before = notes.value.slice(0, start);
+    const needsSpace = before.length && !/\s$/.test(before);
+    prefix = before + (needsSpace ? ' ' : '');
+    suffix = notes.value.slice(end);
+    latestText = '';
+    setState('requesting', 'Starting…');
+    const result = await window.studybuddy.startSpeech(navigator.language || 'en-US');
+    if (!result?.ok) {
+      active = false;
+      setState('error', 'Unavailable');
+      addSystemChatMessage(escapeHtml(result?.error || 'Apple Speech is unavailable in this build.'), 'warning');
+      window.setTimeout(() => setState('idle', 'Dictate'), 1800);
+    } else {
+      active = true;
+    }
+  });
 }
 
 async function connectNotesFile() {
@@ -2476,6 +3717,7 @@ function addChatMessage(role, text) {
   
   container.appendChild(bubble);
   container.scrollTop = container.scrollHeight;
+  saveActiveDocumentSession();
 }
 
 function addSystemChatMessage(text, type = 'system') {
@@ -2486,6 +3728,7 @@ function addSystemChatMessage(text, type = 'system') {
   
   container.appendChild(bubble);
   container.scrollTop = container.scrollHeight;
+  saveActiveDocumentSession();
 }
 
 // Markdown formatting simplified regex
@@ -2605,6 +3848,8 @@ async function runAICommand(command, targetText) {
     if (aiProvider === 'gemini') {
       if (!geminiApiKey) throw new Error("Gemini API Key is missing. Go to settings (top-right) to add it.");
       resultText = await fetchGeminiAPI(systemPrompt);
+    } else if (aiProvider === 'openai-compatible') {
+      resultText = await fetchOpenAICompatibleAPI(systemPrompt);
     } else if (aiProvider === 'ollama') {
       resultText = await fetchOllamaAPI(systemPrompt);
     } else {
@@ -2647,23 +3892,26 @@ async function processGeneralAIPrompt(prompt) {
   
   try {
     let resultText = '';
-    const context = selectedText || await extractPageText(currentPageNum);
-    const enrichedPrompt = context 
-      ? `You are a helpful study assistant. Answer the user's question. Context from page ${currentPageNum} of the PDF:\n"${context}"\n\nUser Question:\n${prompt}`
-      : prompt;
+    if (ragBuildPromise) await ragBuildPromise;
+    const passages = await retrieveDocumentContext(`${prompt} ${selectedText || ''}`);
+    if (!passages.length) throw new Error('The local document index is not ready yet. Try again in a moment.');
+    const enrichedPrompt = buildRagPrompt(prompt, passages);
       
     if (aiProvider === 'gemini') {
       if (!geminiApiKey) throw new Error("Gemini API Key is missing. Go to settings (top-right) to add it.");
       resultText = await fetchGeminiAPI(enrichedPrompt);
+    } else if (aiProvider === 'openai-compatible') {
+      resultText = await fetchOpenAICompatibleAPI(enrichedPrompt);
     } else if (aiProvider === 'ollama') {
-      resultText = await fetchOllamaAPI(enrichedPrompt);
+      const visualQuestion = /\b(image|diagram|figure|chart|table|graph|equation|formula|illustration|shown|visible|layout|page|screenshot)\b/i.test(prompt);
+      const pageImage = isMultimodalOllamaModel(ollamaModel) && visualQuestion ? capturePageForMultimodal(currentPageNum) : null;
+      resultText = await fetchOllamaAPI(enrichedPrompt, pageImage ? [pageImage] : []);
     } else {
-      await new Promise(r => setTimeout(r, 1000));
-      resultText = `Simulated Assistant Answer:\n\nTo answer this question, you need to connect your real Google Gemini API Key or set up a local Ollama model in the Settings modal (top-right). Since you are in Demo Mode, here's a study tip: Highlight relevant definitions in the text first, then ask questions about them!`;
+      resultText = `**Local retrieval found these relevant passages:**\n\n${passages.slice(0, 3).map(item => `- **Page ${item.page}:** ${item.text.slice(0, 240)}${item.text.length > 240 ? '…' : ''}`).join('\n')}\n\nSelect **Ollama** in Settings and choose a local Gemma model to synthesize a complete answer while keeping the document on this device.`;
     }
     
     removeChatLoadingBubble();
-    addChatMessage('assistant', resultText);
+    addRagAssistantMessage(resultText, passages);
   } catch (err) {
     removeChatLoadingBubble();
     addSystemChatMessage(`AI processing error: ${err.message}`, "error");
@@ -2693,18 +3941,79 @@ async function fetchGeminiAPI(prompt) {
   return text;
 }
 
-async function fetchOllamaAPI(prompt) {
-  const url = '/api/ollama/api/chat';
-  
-  const response = await fetch(url, {
+async function fetchOpenAICompatibleAPI(prompt) {
+  if (!openAIBaseUrl || !openAIModel || !openAIApiKey) {
+    throw new Error('Complete the endpoint, model, and API key in AI settings.');
+  }
+  const response = await fetch(`${openAIBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${openAIApiKey}`
+    },
+    body: JSON.stringify({
+      model: openAIModel,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2
+    })
+  });
+  if (!response.ok) {
+    let message = `Compatible API error (HTTP ${response.status})`;
+    try { message = (await response.json()).error?.message || message; } catch (_) {}
+    throw new Error(message);
+  }
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('The compatible API returned no message content.');
+  return text;
+}
+
+async function fetchConfiguredAI(prompt) {
+  if (aiProvider === 'gemini') {
+    if (!geminiApiKey) throw new Error('Gemini API key is missing.');
+    return fetchGeminiAPI(prompt);
+  }
+  if (aiProvider === 'openai-compatible') return fetchOpenAICompatibleAPI(prompt);
+  if (aiProvider === 'ollama') return fetchOllamaAPI(prompt);
+  throw new Error('Select an AI provider in Settings first.');
+}
+
+function capturePageForMultimodal(pageNumber) {
+  const source = document.querySelector(`#page-container-${pageNumber} canvas`);
+  if (!source) return null;
+  try {
+    const maxDimension = 1280;
+    const scale = Math.min(1, maxDimension / Math.max(source.width, source.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(source.width * scale));
+    canvas.height = Math.max(1, Math.round(source.height * scale));
+    canvas.getContext('2d', { alpha: false }).drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', .82).split(',')[1];
+  } catch (error) {
+    console.info('Could not attach the current PDF page image', error.message);
+    return null;
+  }
+}
+
+function isMultimodalOllamaModel(modelName) {
+  return /^(gemma3:(4b|12b|27b)|gemma3n:|gemma4:)/i.test(modelName || '');
+}
+
+async function fetchOllamaAPI(prompt, images = []) {
+  const response = await ollamaFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: ollamaModel,
       messages: [
-        { role: 'user', content: prompt }
+        { role: 'system', content: 'You are a precise local study assistant. Use only the supplied document context and cite page numbers.' },
+        { role: 'user', content: prompt, ...(images.length ? { images } : {}) }
       ],
-      stream: false
+      stream: false,
+      options: {
+        temperature: 0.2,
+        num_ctx: 8192
+      }
     })
   });
   
@@ -3131,44 +4440,36 @@ function initImageSelectionTracker() {
   scrollContainer.addEventListener('keyup', handleSelectionEnd);
 }
 
-function convertMarkdownToHtml(markdown) {
-  let html = markdown
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%; border-radius:8px; margin:10px 0; box-shadow:0 4px 12px rgba(0,0,0,0.15); display:block;" />')
-    .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-    .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-    .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^\* (.*$)/gim, '<li>$1</li>')
-    .replace(/^\- (.*$)/gim, '<li>$1</li>');
-    
-  return html.split('\n').map(line => {
-    if (line.trim().startsWith('<h') || line.trim().startsWith('<li') || line.trim().startsWith('<ul') || line.trim().startsWith('<ol')) {
-      return line;
-    }
-    return line.trim() ? `<p>${line}</p>` : '';
-  }).join('\n');
-}
-
 function initSidebarToggle() {
   const toggleBtn = document.getElementById('btn-toggle-sidebar');
   const workspace = document.getElementById('workspace-panel');
   const divider = document.getElementById('split-divider');
   
   if (toggleBtn && workspace && divider) {
+    const setSidebarState = (collapsed) => {
+      workspace.classList.toggle('collapsed', collapsed);
+      divider.classList.toggle('collapsed', collapsed);
+      toggleBtn.classList.toggle('active', !collapsed);
+      toggleBtn.setAttribute('aria-expanded', String(!collapsed));
+    };
+
+    // On compact browser windows, start with the reader unobstructed.
+    setSidebarState(window.matchMedia('(max-width: 920px)').matches);
+
     toggleBtn.addEventListener('click', () => {
-      const isCollapsed = workspace.classList.toggle('collapsed');
-      divider.classList.toggle('collapsed');
-      toggleBtn.classList.toggle('active');
+      const isCollapsed = !workspace.classList.contains('collapsed');
+      setSidebarState(isCollapsed);
       
       // Trigger PDF rerender/resize when width changes
       setTimeout(() => {
         triggerPDFResize();
       }, 100);
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && window.matchMedia('(max-width: 920px)').matches) {
+        setSidebarState(true);
+      }
     });
   }
 }
@@ -3193,8 +4494,9 @@ const saveSessionToCloud = debounce(async () => {
   // Always save locally first as a fallback/guest persistence
   localStorage.setItem('study_page_num', currentPageNum);
   localStorage.setItem('study_pdf_scale', pdfScale);
+  saveActiveDocumentSession();
 
-  if (!currentUser) {
+  if (!cloudSyncEnabled || !currentUser) {
     showSaveStatus("Saved locally");
     return;
   }
@@ -3207,11 +4509,26 @@ const saveSessionToCloud = debounce(async () => {
     await setDoc(sessionDocRef, {
       currentPageNum: currentPageNum,
       pdfScale: pdfScale,
-      notes: notesContent,
-      highlights: highlights,
-      flashcards: flashcards,
+      activeDocumentId,
       updatedAt: new Date().toISOString()
     }, { merge: true });
+
+    if (activeDocumentId) {
+      const documentDocRef = doc(db, 'users', currentUser.uid, 'documents', activeDocumentId);
+      await setDoc(documentDocRef, {
+        documentId: activeDocumentId,
+        fileName: activeDocumentName,
+        notes: notesContent,
+        chat: document.getElementById('chat-messages')?.innerHTML || initialAssistantMarkup,
+        highlights,
+        currentPageNum,
+        pdfScale,
+        outline: currentDocumentOutline,
+        documentKind: currentDocumentKind,
+        documentContent: activeDocumentType !== 'pdf' && activeDocumentText.length <= 700000 ? activeDocumentText : null,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    }
     
     showSaveStatus("Saved & Synced to Cloud");
   } catch (err) {
@@ -3220,9 +4537,47 @@ const saveSessionToCloud = debounce(async () => {
   }
 }, 1000);
 
+async function loadActiveDocumentCloudSession() {
+  if (!cloudSyncEnabled || !currentUser || !activeDocumentId) return;
+  try {
+    const documentDocRef = doc(db, 'users', currentUser.uid, 'documents', activeDocumentId);
+    const snapshot = await getDoc(documentDocRef);
+    if (!snapshot.exists()) return;
+    const data = snapshot.data();
+    let localSession = {};
+    try { localSession = JSON.parse(localStorage.getItem(documentSessionKey(activeDocumentId)) || '{}'); } catch (_) {}
+    const cloudUpdatedAt = Date.parse(data.updatedAt) || 0;
+    if (Number(localSession.updatedAt || 0) >= cloudUpdatedAt) return;
+    const notes = document.getElementById('notes-textarea');
+    const chat = document.getElementById('chat-messages');
+    if (notes) notes.value = data.notes || '';
+    if (chat && data.chat) chat.innerHTML = normalizeBuddyMarkup(data.chat);
+    highlights = data.highlights || {};
+    currentPageNum = data.currentPageNum || currentPageNum;
+    pdfScale = data.pdfScale || pdfScale;
+    currentDocumentOutline = data.outline || currentDocumentOutline;
+    currentDocumentKind = data.documentKind || currentDocumentKind;
+    if (activeDocumentType !== 'pdf' && typeof data.documentContent === 'string') {
+      activeDocumentText = data.documentContent;
+      const editor = document.getElementById('text-document-editor');
+      if (editor) editor.value = activeDocumentText;
+      currentDocumentOutline = buildTextDocumentOutline(activeDocumentText);
+      renderTextDocumentOutline(currentDocumentOutline);
+      currentRagIndex = null;
+      ragBuildPromise = initializeTextRag(activeDocumentText);
+    } else if (currentDocumentOutline.length) {
+      renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
+    }
+    saveActiveDocumentSession();
+    if (currentPageNum > 1) jumpToPage(currentPageNum);
+  } catch (error) {
+    console.warn('Could not restore this document workspace from cloud', error);
+  }
+}
+
 // Load Cloud Session
 async function loadSessionFromCloud() {
-  if (!currentUser) return;
+  if (!cloudSyncEnabled || !currentUser) return;
   
   try {
     const sessionDocRef = doc(db, 'users', currentUser.uid, 'data', 'session');
@@ -3232,7 +4587,7 @@ async function loadSessionFromCloud() {
       const data = docSnap.data();
       
       // Update highlights
-      if (data.highlights) {
+      if (!activeDocumentId && data.highlights) {
         highlights = data.highlights;
         localStorage.setItem('study_highlights', JSON.stringify(highlights));
         
@@ -3250,7 +4605,7 @@ async function loadSessionFromCloud() {
       }
       
       // Update notes
-      if (data.notes !== undefined) {
+      if (!activeDocumentId && data.notes !== undefined) {
         const notesTextarea = document.getElementById('notes-textarea');
         if (notesTextarea) {
           notesTextarea.value = data.notes;
@@ -3294,12 +4649,15 @@ async function loadSessionFromCloud() {
 
 // Initialize Auth listeners and handlers
 function initFirebaseAuth() {
+  if (firebaseAuthInitialized) return;
+  firebaseAuthInitialized = true;
   const profileBtn = document.getElementById('btn-auth-profile');
   const authDialog = document.getElementById('auth-dialog');
   const closeAuthBtn = document.getElementById('btn-close-auth');
   const googleSigninBtn = document.getElementById('btn-google-signin');
+  const appleSigninBtn = document.getElementById('btn-apple-signin');
   const signoutBtn = document.getElementById('btn-auth-signout');
-  
+
   const statusIcon = document.getElementById('auth-status-icon');
   const statusText = document.getElementById('auth-status-text-display');
   const avatarLarge = document.getElementById('auth-avatar-large');
@@ -3336,20 +4694,33 @@ function initFirebaseAuth() {
     });
   }
 
-  // Google Sign-In
-  if (googleSigninBtn) {
-    googleSigninBtn.addEventListener('click', async () => {
-      const provider = new GoogleAuthProvider();
-      try {
-        addSystemChatMessage("Signing in with Google...", "primary");
-        await signInWithPopup(auth, provider);
-        authDialog.close();
-      } catch (err) {
-        console.error("Google sign in failed", err);
-        addSystemChatMessage(`Google Sign-In failed: ${err.message}`, "error");
-      }
-    });
-  }
+  const signInForLocalProfile = async (provider, providerName) => {
+    try {
+      addSystemChatMessage(`Connecting your ${providerName} profile…`, 'primary');
+      await signInWithPopup(auth, provider);
+      authDialog.close();
+      addSystemChatMessage(`${providerName} profile connected. Your study data remains only on this device.`, 'success');
+    } catch (err) {
+      console.error(`${providerName} sign in failed`, err);
+      const setupHint = providerName === 'Apple' && err.code === 'auth/operation-not-allowed'
+        ? ' Enable Apple as a sign-in provider in Firebase Authentication first.'
+        : '';
+      addSystemChatMessage(`${providerName} sign-in failed: ${err.message}.${setupHint}`, 'error');
+    }
+  };
+
+  googleSigninBtn?.addEventListener('click', () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    signInForLocalProfile(provider, 'Google');
+  });
+
+  appleSigninBtn?.addEventListener('click', () => {
+    const provider = new OAuthProvider('apple.com');
+    provider.addScope('email');
+    provider.addScope('name');
+    signInForLocalProfile(provider, 'Apple');
+  });
 
   // Sign Out
   if (signoutBtn) {
@@ -3368,64 +4739,49 @@ function initFirebaseAuth() {
   // Listen to Auth State Changes
   onAuthStateChanged(auth, async (user) => {
     if (user) {
-      // If we already had a different account loaded in this browser tab
-      // (e.g. guest -> Google account A -> Google account B), wipe the
-      // in-memory/local state first so the new account never inherits the
-      // previous account's notes, highlights, flashcards, or PDF.
-      const uidChanged = sessionAuthInitialized && lastKnownUid !== user.uid;
-      if (uidChanged) {
-        resetSessionState();
-      }
       sessionAuthInitialized = true;
       lastKnownUid = user.uid;
       currentUser = user;
 
       const isAnonymous = user.isAnonymous;
       if (isAnonymous) {
-        if (statusIcon) statusIcon.textContent = "👤";
-        if (statusText) statusText.textContent = "Guest Session";
-        if (avatarLarge) avatarLarge.textContent = "👤";
-        if (userName) userName.textContent = "Guest Student";
-        if (userEmail) userEmail.textContent = "Anonymous Guest Session";
+        if (statusIcon) statusIcon.textContent = '⌂';
+        if (statusText) statusText.textContent = 'Local';
+        if (avatarLarge) avatarLarge.textContent = '⌂';
+        if (userName) userName.textContent = 'Local Student';
+        if (userEmail) userEmail.textContent = 'No account connected';
         if (cloudBadge) {
-          cloudBadge.className = "badge badge-demo";
-          cloudBadge.textContent = "Local Temp Storage";
+          cloudBadge.className = 'badge badge-active';
+          cloudBadge.textContent = 'LOCAL DATA ONLY';
         }
-        
-        if (googleSigninBtn) googleSigninBtn.style.display = "flex";
-        if (signoutBtn) signoutBtn.style.display = "none";
+
+        if (googleSigninBtn) googleSigninBtn.style.display = 'flex';
+        if (appleSigninBtn) appleSigninBtn.style.display = 'flex';
+        if (signoutBtn) signoutBtn.style.display = 'none';
       } else {
         const photoURL = user.photoURL;
         if (photoURL) {
           if (statusIcon) statusIcon.innerHTML = `<img src="${photoURL}" alt="avatar" style="width:18px; height:18px; border-radius:50%; vertical-align:middle; object-fit:cover;" />`;
           if (avatarLarge) avatarLarge.innerHTML = `<img src="${photoURL}" alt="avatar" style="width:64px; height:64px; border-radius:50%; object-fit:cover;" />`;
         } else {
-          if (statusIcon) statusIcon.textContent = "🎓";
-          if (avatarLarge) avatarLarge.textContent = "🎓";
+          if (statusIcon) statusIcon.textContent = '●';
+          if (avatarLarge) avatarLarge.textContent = '●';
         }
-        
-        if (statusText) statusText.textContent = user.displayName || user.email || "Student";
-        if (userName) userName.textContent = user.displayName || "Google Student";
-        if (userEmail) userEmail.textContent = user.email || "Google Account Connected";
+
+        const providerId = user.providerData?.[0]?.providerId || '';
+        const providerLabel = providerId === 'apple.com' ? 'Apple' : 'Google';
+        if (statusText) statusText.textContent = user.displayName || user.email || 'Student';
+        if (userName) userName.textContent = user.displayName || `${providerLabel} Student`;
+        if (userEmail) userEmail.textContent = user.email || `${providerLabel} profile connected`;
         if (cloudBadge) {
-          cloudBadge.className = "badge badge-active";
-          cloudBadge.textContent = "Cloud Sync Active";
+          cloudBadge.className = 'badge badge-active';
+          cloudBadge.textContent = 'SIGNED IN · DATA LOCAL';
         }
-        
-        if (googleSigninBtn) googleSigninBtn.style.display = "none";
-        if (signoutBtn) signoutBtn.style.display = "flex";
+
+        if (googleSigninBtn) googleSigninBtn.style.display = 'none';
+        if (appleSigninBtn) appleSigninBtn.style.display = 'none';
+        if (signoutBtn) signoutBtn.style.display = 'flex';
       }
-
-      await loadSessionFromCloud();
-
-      // Restore this account's own PDF: try its cloud copy first (so it
-      // follows the account across devices/browsers), falling back to this
-      // browser's local cache for the same account if cloud lookup fails.
-      const hasCloudPdf = await loadUserPdfFromCloud();
-      if (!hasCloudPdf) {
-        await restorePersistedPdf();
-      }
-
     } else {
       lastKnownUid = null;
       currentUser = null;
@@ -3433,7 +4789,8 @@ function initFirebaseAuth() {
         await signInAnonymously(auth);
       } catch (err) {
         console.error("Anonymous auth failed", err);
-        addSystemChatMessage("Cloud Sync authentication offline. Using local backup storage.", "warning");
+        if (statusText) statusText.textContent = 'Local';
+        if (cloudBadge) cloudBadge.textContent = 'LOCAL DATA ONLY';
       }
     }
   });
