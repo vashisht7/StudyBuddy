@@ -20,7 +20,7 @@ Download the current beta from [GitHub Releases](https://github.com/vashisht7/St
 3. This beta is not notarized yet. On first launch, Control-click StudyBuddy, choose **Open**, then confirm **Open**.
 4. Add a document. Notes, chats, highlights, RAG data, and reading progress remain on the Mac.
 
-The complete offline DMG is larger than GitHub's per-file upload limit. Download both `.part-aa` and `.part-ab` assets plus `Join-StudyBuddy-Offline.command`, keep them together, and double-click the join script. It verifies the reconstructed DMG before opening it.
+The complete offline DMG is larger than GitHub's per-file upload limit. Download both `.part-aa` and `.part-ab` assets plus `Join-StudyBuddy-Offline.zip`. Expand the ZIP, keep the resulting command beside both parts, and open it. The script verifies the reconstructed DMG before opening it.
 
 See the [complete Mac installation guide](./MAC_INSTALL_GUIDE.md) for permissions, local AI setup, speech-to-text, shortcuts, and privacy details.
 

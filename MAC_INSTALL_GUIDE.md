@@ -28,8 +28,8 @@ For generated AI answers, open **AI Settings** and either:
 
 ## Install the complete offline edition
 
-1. From the GitHub release, download both offline `.part-aa` and `.part-ab` files plus `Join-StudyBuddy-Offline.command` into the same folder.
-2. Double-click the join script. It reconstructs the DMG, verifies its SHA-256 checksum, and opens it only when the download is intact.
+1. From the GitHub release, download both offline `.part-aa` and `.part-ab` files plus `Join-StudyBuddy-Offline.zip` into the same folder.
+2. Expand the ZIP and open the join command beside the two parts. It reconstructs the DMG, verifies its SHA-256 checksum, and opens it only when the download is intact.
 3. In the opened DMG, read **READ ME — Install StudyBuddy.txt**.
 4. Double-click **Install StudyBuddy Offline.command**, type `y`, and leave the DMG mounted while its three progress steps finish.
 5. The installer checks free space, copies StudyBuddy, Ollama, and Gemma 3 4B into the user account, then launches them automatically.
