@@ -219,26 +219,9 @@
             <div class="tab-pane" id="tab-notes">
               <div class="notes-container">
                 
-                <!-- Local File Connection Bar (Web File System Access) -->
-                <div class="file-connection-card">
-                  <div class="file-status-info">
-                    <span class="notes-document-label" id="notes-document-label">Notes for this document</span>
-                    <div class="status-indicator-group">
-                      <span class="status-dot disconnected" id="file-status-dot"></span>
-                      <span class="status-label" id="file-status-text">Disconnected Note File</span>
-                    </div>
-                    <span class="file-path-display" id="file-path-text">No local file selected</span>
-                  </div>
-                  
-                  <div class="file-actions">
-                    <button class="btn btn-secondary btn-sm" id="btn-connect-file">
-                      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/></svg>
-                      Connect File
-                    </button>
-                    <button class="btn-icon btn-sm" id="btn-disconnect-file" title="Disconnect File" style="display: none;">
-                      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                    </button>
-                  </div>
+                <div class="notes-workspace-header">
+                  <span class="notes-document-label" id="notes-document-label">Notes for this document</span>
+                  <span class="notes-local-badge"><i></i>Private · saved locally</span>
                 </div>
                 
                 <!-- Note Editing Workspace -->

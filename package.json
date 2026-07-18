@@ -1,6 +1,6 @@
 {
   "name": "studybuddy",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "A local-first PDF reading, notes, and multimodal AI study workspace for macOS.",
   "author": "Vashisht Devasani",
   "private": true,

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PART_A="$SCRIPT_DIR/StudyBuddy-1.0.1-Compact-Offline-arm64.dmg.part-aa"
-PART_B="$SCRIPT_DIR/StudyBuddy-1.0.1-Compact-Offline-arm64.dmg.part-ab"
-OUTPUT_DMG="$SCRIPT_DIR/StudyBuddy-1.0.1-Compact-Offline-arm64.dmg"
-EXPECTED_SHA256="40a473231b893b9c8a4e4918479e44a8f0b5fbd791fbfcf0958f3810c28002c3"
+PART_A="$SCRIPT_DIR/StudyBuddy-1.1.0-Compact-Offline-arm64.dmg.part-aa"
+PART_B="$SCRIPT_DIR/StudyBuddy-1.1.0-Compact-Offline-arm64.dmg.part-ab"
+OUTPUT_DMG="$SCRIPT_DIR/StudyBuddy-1.1.0-Compact-Offline-arm64.dmg"
+EXPECTED_SHA256="bd6cc7959f4bdd01fa03d3dd7ea5def87d7357f79ddfb8d580e8f037bb381d27"
 
 clear
 echo "StudyBuddy Complete Offline — Secure Join"

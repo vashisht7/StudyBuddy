@@ -2,6 +2,14 @@
 
 This roadmap keeps StudyBuddy focused on one promise: turn any document into a private, calm, active-reading workspace. Priorities may change as real readers test the app.
 
+## Recommended next five
+
+1. **OCR and visual RAG** for scanned books, handwritten pages, figures, tables, and equations.
+2. **Citation inspector** that opens every Buddy claim beside the exact supporting passage.
+3. **Editable flashcards and quizzes** generated from a chapter, selected highlights, or notes, with local spaced repetition.
+4. **EPUB and richer Word support** with preserved chapters, formatting, images, and navigation.
+5. **Signed auto-updates and backup** so readers can upgrade safely and export or restore their entire local library.
+
 ## Next release — trust and daily usability
 
 - Signed and notarized universal macOS build with an in-app update channel.
@@ -69,4 +77,3 @@ This roadmap keeps StudyBuddy focused on one promise: turn any document into a p
 - Privacy review proving that local mode makes no document, note, chat, or audio upload.
 - Automated accessibility, import/export, persistence, RAG-grounding, and release-package tests.
 - Public privacy policy, support channel, crash recovery plan, and documented data deletion behavior.
-
