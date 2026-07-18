@@ -37,7 +37,6 @@ let currentPageNum = parseInt(localStorage.getItem('study_page_num') || '1');
 let pdfPagesCount = 0;
 let isRenderingPage = {};
 let pageRenderTasks = {};
-let notesFileHandle = null;
 let geminiApiKey = localStorage.getItem('study_gemini_api_key') || '';
 let aiProvider = localStorage.getItem('study_ai_provider') || 'demo';
 let ollamaUrl = localStorage.getItem('study_ollama_url') || 'http://localhost:11434';
@@ -650,9 +649,15 @@ function saveActiveDocumentSession() {
     highlights,
     outline: currentDocumentOutline,
     documentKind: currentDocumentKind,
-    outlineVersion: 5,
+    outlineVersion: 9,
     updatedAt: Date.now()
   }));
+}
+
+function persistActiveNotes() {
+  if (!activeDocumentId) return;
+  saveActiveDocumentSession();
+  showSaveStatus('Saved to this workspace');
 }
 
 function restoreDocumentSession(id) {
@@ -661,14 +666,13 @@ function restoreDocumentSession(id) {
   currentPageNum = session.page || 1;
   pdfScale = session.scale || 1.2;
   highlights = session.highlights || {};
-  currentDocumentOutline = session.outlineVersion === 5 ? (session.outline || []) : [];
+  currentDocumentOutline = session.outlineVersion === 9 ? (session.outline || []) : [];
   currentDocumentKind = session.documentKind || 'document';
   const notes = document.getElementById('notes-textarea');
   const chat = document.getElementById('chat-messages');
   if (notes) notes.value = session.notes || '';
   const chatBelongsToDocument = session.chatDocumentId === id;
   if (chat) chat.innerHTML = chatBelongsToDocument ? normalizeBuddyMarkup(session.chat) : initialAssistantMarkup;
-  localStorage.setItem('study_notes', session.notes || '');
   localStorage.setItem('study_highlights', JSON.stringify(highlights));
   document.getElementById('zoom-text').textContent = `${Math.round(pdfScale * 100)}%`;
   if (currentDocumentOutline.length) renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
@@ -735,6 +739,7 @@ async function openLibraryDocument(id) {
   activeDocumentType = documentExtension(record.fileName);
   currentRagIndex = null;
   ragBuildPromise = null;
+  selectedText = '';
   restoreDocumentSession(id);
   const notesLabel = document.getElementById('notes-document-label');
   if (notesLabel) notesLabel.textContent = `Notes · ${record.fileName.replace(/\.[^.]+$/i, '')}`;
@@ -915,7 +920,7 @@ async function syncCloudLibraryToLocal() {
           highlights: data.highlights || {},
           outline: data.outline || [],
           documentKind: data.documentKind || 'document',
-          outlineVersion: 5,
+          outlineVersion: 9,
           updatedAt: cloudUpdatedAt
         }));
       }
@@ -1109,8 +1114,8 @@ async function onCaptureMouseUp(e) {
           const markdownImage = `\n\n![Captured Image (Page ${targetPageNum})](${base64Data})\n\n`;
           notesTextarea.value += markdownImage;
           
-          // Trigger autosave/sync
-          localStorage.setItem('study_notes', notesTextarea.value);
+          // Save only to the currently open document workspace.
+          persistActiveNotes();
           saveSessionToCloud();
           
           // Switch to Notes tab
@@ -1610,7 +1615,9 @@ function updateApiStatusDisplay() {
 // ==========================================================================
 // File Upload Actions
 // ==========================================================================
-function buildTextDocumentOutline(text) {
+const CODE_EXTENSIONS = new Set(['js', 'jsx', 'ts', 'tsx', 'py', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'go', 'rs', 'sh', 'css', 'html', 'xml', 'json', 'yaml', 'yml', 'toml']);
+
+function buildTextDocumentOutline(text, kind = 'document') {
   const lines = text.split(/\r?\n/);
   const items = [];
   let offset = 0;
@@ -1618,11 +1625,14 @@ function buildTextDocumentOutline(text) {
     const line = rawLine.trim();
     const markdown = line.match(/^(#{1,4})\s+(.+)/);
     const numbered = line.match(/^((?:\d+\.){0,3}\d+|chapter\s+\w+|section\s+\w+)[:.)\s-]+(.+)/i);
+    const codeSymbol = kind === 'code' && line.match(/^(?:export\s+)?(?:async\s+)?(?:class|function|interface|type|enum|struct|protocol|def|func|fn)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(/);
+    const resumeHeading = kind === 'resume' && /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|awards|publications|languages|volunteering|interests)$/i.test(line.replace(/:$/, ''));
     const shortHeading = line.length >= 3 && line.length <= 72 && !/[.!?]$/.test(line) && (/^[A-Z][A-Za-z0-9 '&:/_-]+$/.test(line) || line === line.toUpperCase());
-    if (markdown || numbered || shortHeading) {
-      const title = (markdown?.[2] || line.replace(/^#+\s*/, '')).trim();
+    if (markdown || numbered || codeSymbol || resumeHeading || shortHeading) {
+      const title = (markdown?.[2] || codeSymbol?.[1] || codeSymbol?.[2] || line.replace(/^#+\s*/, '').replace(/:$/, '')).trim();
       if (title && !items.some(item => item.title.toLowerCase() === title.toLowerCase())) {
-        items.push({ title, page: items.length + 1, level: markdown ? Math.min(markdown[1].length, 3) : (numbered ? 2 : 1), position: offset });
+        const level = markdown ? Math.min(markdown[1].length, 3) : (codeSymbol ? 2 : (numbered ? 2 : 1));
+        items.push({ title, page: items.length + 1, level, position: offset });
       }
     }
     offset += rawLine.length + 1;
@@ -1637,7 +1647,51 @@ function buildTextDocumentOutline(text) {
       items.push({ title: clean.slice(0, 58) + (clean.length > 58 ? '…' : ''), page: index + 1, level: 2, position: Math.max(0, position) });
     });
   }
-  return items.slice(0, 30);
+  return items.slice(0, 120);
+}
+
+function renderOutlineHierarchy(items, onActivate) {
+  const list = document.getElementById('outline-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const groups = [];
+  let currentGroup = null;
+  items.forEach((item, index) => {
+    if ((item.level || 2) === 1 || !currentGroup) {
+      currentGroup = { parent: item, parentIndex: index, children: [] };
+      groups.push(currentGroup);
+    } else {
+      currentGroup.children.push({ item, index });
+    }
+  });
+
+  groups.forEach((group) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'outline-folder expanded';
+    const parent = document.createElement('button');
+    parent.className = 'outline-item outline-folder-row level-1';
+    parent.innerHTML = `<span class="outline-chevron">⌄</span><span class="outline-label">${escapeHtml(group.parent.title)}</span><span class="outline-page">${group.parent.page || ''}</span>`;
+    parent.addEventListener('click', () => {
+      onActivate(group.parent, parent);
+      if (group.children.length) wrapper.classList.toggle('expanded');
+    });
+    wrapper.appendChild(parent);
+    if (group.children.length) {
+      const children = document.createElement('div');
+      children.className = 'outline-children';
+      group.children.forEach(({ item, index }) => {
+        const child = document.createElement('button');
+        child.className = `outline-item level-${item.level || 2}`;
+        child.innerHTML = `<span class="outline-index">${String(index + 1).padStart(2, '0')}</span><span class="outline-label">${escapeHtml(item.title)}</span><span class="outline-page">${item.page || ''}</span>`;
+        child.addEventListener('click', () => onActivate(item, child));
+        children.appendChild(child);
+      });
+      wrapper.appendChild(children);
+    } else {
+      parent.querySelector('.outline-chevron').textContent = '·';
+    }
+    list.appendChild(wrapper);
+  });
 }
 
 function renderTextDocumentOutline(items) {
@@ -1645,22 +1699,16 @@ function renderTextDocumentOutline(items) {
   const kindElement = document.getElementById('document-kind');
   const editor = document.getElementById('text-document-editor');
   if (!list || !kindElement || !editor) return;
-  const typeLabel = activeDocumentType === 'docx' ? 'Word document' : 'Editable document';
+  const typeLabels = { code: 'Source code', resume: 'Résumé', article: 'Article', blog: 'Blog post', document: activeDocumentType === 'docx' ? 'Word document' : 'Editable document' };
+  const typeLabel = typeLabels[currentDocumentKind] || 'Editable document';
   kindElement.innerHTML = `<span class="kind-icon">⌘</span><span><strong>${typeLabel}</strong><small>Mapped locally · ${items.length} sections</small></span>`;
-  list.innerHTML = '';
-  items.forEach((item, index) => {
-    const button = document.createElement('button');
-    button.className = `outline-item level-${item.level || 2}`;
-    button.innerHTML = `<span class="outline-index">${String(index + 1).padStart(2, '0')}</span><span class="outline-label">${escapeHtml(item.title)}</span>`;
-    button.addEventListener('click', () => {
+  renderOutlineHierarchy(items, (item, button) => {
       editor.focus();
       editor.setSelectionRange(item.position || 0, item.position || 0);
       const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 24;
       editor.scrollTop = Math.max(0, (activeDocumentText.slice(0, item.position || 0).split('\n').length - 3) * lineHeight);
       list.querySelectorAll('.outline-item').forEach(node => node.classList.remove('active'));
       button.classList.add('active');
-    });
-    list.appendChild(button);
   });
 }
 
@@ -1672,6 +1720,8 @@ async function initializeTextRag(text) {
   let totalLength = 0;
   chunks.forEach((chunk, id) => {
     chunk.id = id;
+    const approximateCharacter = chunk.position * 6;
+    chunk.sectionTitle = [...currentDocumentOutline].reverse().find(item => (item.position || 0) <= approximateCharacter)?.title || '';
     const tokens = tokenizeForRag(chunk.text);
     chunk.terms = {};
     tokens.forEach(token => { chunk.terms[token] = (chunk.terms[token] || 0) + 1; });
@@ -1681,7 +1731,7 @@ async function initializeTextRag(text) {
   });
   currentRagIndex = {
     documentId: activeDocumentId,
-    version: 3,
+    version: 7,
     pageCount: 1,
     chunks,
     documentFrequency,
@@ -1707,8 +1757,8 @@ async function openTextDocument(record) {
     activeDocumentText = new TextDecoder('utf-8').decode(record.arrayBuffer);
   }
   currentDocumentAnalysisText = activeDocumentText.slice(0, 60000);
-  currentDocumentKind = activeDocumentType === 'docx' ? 'document' : (['md', 'markdown'].includes(activeDocumentType) ? 'article' : 'document');
-  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText);
+  currentDocumentKind = classifyDocument(activeDocumentText, 1, record.fileName);
+  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText, currentDocumentKind);
   document.getElementById('app').classList.add('text-document-mode');
   document.getElementById('pdf-scroll-container').style.display = 'none';
   document.getElementById('text-document-container').style.display = 'flex';
@@ -1732,7 +1782,8 @@ async function saveTextDocumentChanges() {
   const encoded = isWordSource ? record.arrayBuffer : new TextEncoder().encode(activeDocumentText).buffer;
   await saveLibraryDocument({ ...record, arrayBuffer: encoded, contentText: activeDocumentText, size: encoded.byteLength, updatedAt: Date.now() });
   currentDocumentAnalysisText = activeDocumentText.slice(0, 60000);
-  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText);
+  currentDocumentKind = classifyDocument(activeDocumentText, 1, activeDocumentName);
+  currentDocumentOutline = buildTextDocumentOutline(activeDocumentText, currentDocumentKind);
   renderTextDocumentOutline(currentDocumentOutline);
   currentRagIndex = null;
   ragBuildPromise = initializeTextRag(activeDocumentText);
@@ -1899,7 +1950,7 @@ async function loadPdfDoc(pdfSource) {
     }
 
     if (!currentDocumentOutline.length) {
-      analyzeDocumentLocally();
+      await analyzeDocumentLocally();
     } else {
       renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
     }
@@ -1961,7 +2012,7 @@ async function initializeLocalRag() {
   setRagStatus('indexing', `Indexing ${pdfPagesCount} pages locally…`);
   try {
     const saved = await getRagIndex(activeDocumentId);
-    if (saved?.version === 2 && saved.pageCount === pdfPagesCount) {
+    if (saved?.version === 7 && saved.pageCount === pdfPagesCount && saved.documentId === activeDocumentId) {
       currentRagIndex = saved;
       setRagStatus('ready', `${saved.embeddings?.length ? 'Hybrid RAG' : 'Local RAG'} ready · ${saved.chunks.length} passages`);
       return saved;
@@ -1972,7 +2023,9 @@ async function initializeLocalRag() {
       const page = await pdfDoc.getPage(pageNumber);
       const content = await page.getTextContent();
       const text = content.items.map(item => item.str).join(' ').replace(/\s+/g, ' ').trim();
-      chunks.push(...chunkPageText(text, pageNumber));
+      const pageSections = currentDocumentOutline.filter(item => item.page <= pageNumber);
+      const sectionTitle = pageSections.length ? pageSections[pageSections.length - 1].title : '';
+      chunks.push(...chunkPageText(text, pageNumber).map(chunk => ({ ...chunk, sectionTitle })));
       if (pageNumber % 8 === 0) {
         setRagStatus('indexing', `Indexing locally · ${pageNumber}/${pdfPagesCount} pages`);
         await new Promise(resolve => setTimeout(resolve, 0));
@@ -1993,7 +2046,7 @@ async function initializeLocalRag() {
     });
     currentRagIndex = {
       documentId: activeDocumentId,
-      version: 2,
+      version: 7,
       pageCount: pdfPagesCount,
       chunks,
       documentFrequency,
@@ -2075,13 +2128,35 @@ async function embedRagQuery(query) {
 }
 
 async function retrieveDocumentContext(query, limit = 6) {
-  if (!currentRagIndex?.chunks?.length) return [];
-  const queryTokens = tokenizeForRag(query);
+  if (!currentRagIndex?.chunks?.length || currentRagIndex.documentId !== activeDocumentId) return [];
+  const focusedQuery = query
+    .replace(/\b(please|can you|could you|would you|explain|describe|tell me about|what is|what are|the section|the chapter)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || query;
+  const queryTokens = tokenizeForRag(`${focusedQuery} ${query}`);
   const uniqueTerms = [...new Set(queryTokens)];
   const { chunks, documentFrequency, averageLength } = currentRagIndex;
   const totalChunks = chunks.length;
-  const normalizedQuery = query.toLowerCase().replace(/\s+/g, ' ').trim();
-  const queryEmbedding = await embedRagQuery(query);
+  const normalizedQuery = focusedQuery.toLowerCase();
+  const queryEmbedding = await embedRagQuery(focusedQuery);
+  let matchedSection = null;
+  let matchedSectionScore = 0;
+  let matchedSectionOverlap = 0;
+  const requestedSectionNumber = query.match(/\b\d+(?:\.\d+)+\b/)?.[0] || '';
+  currentDocumentOutline.forEach((item, index) => {
+    const titleTokens = [...new Set(tokenizeForRag(item.title))];
+    const overlap = titleTokens.filter(token => uniqueTerms.includes(token)).length;
+    const titleSectionNumber = item.title.match(/^\s*(\d+(?:\.\d+)+)\b/)?.[1] || '';
+    const exactSectionNumber = requestedSectionNumber && requestedSectionNumber === titleSectionNumber;
+    const score = exactSectionNumber ? 2 : overlap / Math.max(titleTokens.length, 1);
+    if (overlap >= 1 && (score > matchedSectionScore || (score === matchedSectionScore && overlap > matchedSectionOverlap))) {
+      const next = currentDocumentOutline.slice(index + 1).find(candidate => (candidate.level || 2) <= (item.level || 2));
+      matchedSection = { ...item, endPage: next ? Math.max(item.page, next.page - 1) : currentRagIndex.pageCount };
+      matchedSectionScore = score;
+      matchedSectionOverlap = overlap;
+    }
+  });
+  if (matchedSectionScore < .5) matchedSection = null;
   const scored = chunks.map(chunk => {
     let score = 0;
     uniqueTerms.forEach(term => {
@@ -2093,7 +2168,12 @@ async function retrieveDocumentContext(query, limit = 6) {
       score += idf * ((tf * 2.35) / denominator);
     });
     const lowerText = chunk.text.toLowerCase();
+    const lowerSection = (chunk.sectionTitle || '').toLowerCase();
     if (normalizedQuery.length > 8 && lowerText.includes(normalizedQuery)) score += 8;
+    if (normalizedQuery.length > 2 && lowerSection.includes(normalizedQuery)) score += 12;
+    const sectionCoverage = uniqueTerms.filter(term => tokenizeForRag(lowerSection).includes(term)).length / Math.max(uniqueTerms.length, 1);
+    score += sectionCoverage * 6;
+    if (matchedSection && chunk.page >= matchedSection.page && chunk.page <= matchedSection.endPage) score += 10;
     const coverage = uniqueTerms.filter(term => chunk.terms[term]).length / Math.max(uniqueTerms.length, 1);
     score += coverage * 2.5;
     if (queryEmbedding && currentRagIndex.embeddings?.[chunk.id]) {
@@ -2103,20 +2183,33 @@ async function retrieveDocumentContext(query, limit = 6) {
     return { ...chunk, score };
   }).sort((a, b) => b.score - a.score);
 
-  let selected = scored.filter(item => item.score > .12).slice(0, limit);
-  if (!selected.length) selected = scored.slice(0, 3);
+  let rankedPool = scored;
+  if (matchedSection) {
+    const withinSection = scored.filter(item => item.page >= matchedSection.page && item.page <= matchedSection.endPage);
+    if (withinSection.length) rankedPool = [...withinSection, ...scored.filter(item => !withinSection.includes(item))];
+  }
+  let anchors = rankedPool.filter(item => item.score > .12).slice(0, Math.max(3, Math.ceil(limit / 2)));
+  if (!anchors.length) anchors = scored.slice(0, 3);
+  let selected = [];
+  anchors.forEach(anchor => {
+    selected.push(anchor);
+    const previous = chunks[anchor.id - 1];
+    const next = chunks[anchor.id + 1];
+    if (previous && (previous.page === anchor.page || previous.sectionTitle === anchor.sectionTitle)) selected.push({ ...previous, score: anchor.score * .72 });
+    if (next && (next.page === anchor.page || next.sectionTitle === anchor.sectionTitle)) selected.push({ ...next, score: anchor.score * .76 });
+  });
   if (/\b(summary|summarize|overview|about|main idea|thesis)\b/i.test(query)) {
     selected = [...chunks.slice(0, 2).map(chunk => ({ ...chunk, score: 1 })), ...selected];
   }
   const unique = new Map();
   selected.forEach(item => unique.set(item.id, item));
-  return [...unique.values()].slice(0, limit);
+  return [...unique.values()].sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 function buildRagPrompt(question, passages) {
   const isPdf = activeDocumentType === 'pdf';
   const location = isPdf ? 'Page' : 'Passage';
-  const context = passages.map(item => `[${location} ${item.page}]\n${item.text}`).join('\n\n---\n\n');
+  const context = passages.map(item => `[${location} ${item.page}${item.sectionTitle ? ` · Section: ${item.sectionTitle}` : ''}]\n${item.text}`).join('\n\n---\n\n');
   return `You are a document-grounded study assistant answering only about the currently open document: "${activeDocumentName}". Answer the question using only the retrieved passages below.
 
 Rules:
@@ -2125,6 +2218,8 @@ Rules:
 - Cite supporting ${isPdf ? 'pages inline as [p. N]' : 'passages inline as [passage N]'}.
 - If the passages do not contain enough information, say what is missing.
 - Explain clearly for a student. Use short headings or bullets only when helpful.
+- When asked to explain a section, combine all relevant retrieved passages into a coherent explanation: begin with the central idea, then explain the details and relationships, and end with a brief takeaway.
+- Treat section titles as navigation metadata, not as evidence by themselves.
 - ${isPdf ? 'A rendered image of the currently visible PDF page may be attached. Use it for diagrams, tables, equations, and visual layout, while citing that page.' : 'The source is editable text; respect its current locally saved contents.'}
 - The document is classified as a ${currentDocumentKind}.
 
@@ -2165,11 +2260,17 @@ function median(values) {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-function classifyDocument(text, pageCount) {
+function classifyDocument(text, pageCount, fileName = activeDocumentName) {
   const normalized = text.toLowerCase();
+  const extension = documentExtension(fileName || '');
+  if (CODE_EXTENSIONS.has(extension)) return 'code';
+  const resumeSignals = ['work experience', 'professional experience', 'education', 'skills', 'employment', 'certifications', 'curriculum vitae'];
+  const resumeScore = resumeSignals.filter(signal => normalized.includes(signal)).length;
+  if (resumeScore >= 2 && pageCount <= 6) return 'resume';
   if (/\babstract\b/.test(normalized) && /\b(references|bibliography)\b/.test(normalized)) return 'research paper';
-  if (/\b(chapter\s+(\d+|[ivxlcdm]+)|textbook|study guide|cram book|table of contents)\b/.test(normalized) || pageCount >= 28) return 'book';
-  if (/\bposted (on|by)\b|\bmin read\b|\bblog\b/.test(normalized)) return 'blog';
+  const chapterSignals = (normalized.match(/\bchapter\s+(\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b/g) || []).length;
+  if (chapterSignals >= 1 || /\b(textbook|study guide|table of contents|isbn)\b/.test(normalized) || pageCount >= 28) return 'book';
+  if (/\bposted (on|by)\b|\bmin(?:ute)? read\b|\bblog\b|\bsubscribe\b|\bcomments?\b/.test(normalized)) return 'blog';
   if (pageCount <= 16) return 'article';
   return 'document';
 }
@@ -2221,7 +2322,7 @@ async function analyzeDocumentLocally() {
       currentDocumentAnalysisText = sampleText.join('\n').slice(0, 24000);
       currentDocumentKind = classifyDocument(currentDocumentAnalysisText, pdfPagesCount);
       if (embeddedOutline.some(item => /^(chapter|part|introduction)\b/i.test(item.title))) currentDocumentKind = 'book';
-      currentDocumentOutline = embeddedOutline.slice(0, 60);
+      currentDocumentOutline = embeddedOutline.slice(0, 120);
       renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
       saveActiveDocumentSession();
       return;
@@ -2267,11 +2368,12 @@ async function analyzeDocumentLocally() {
     const key = line.text.toLowerCase().replace(/\d+/g, '#');
     repeated.set(key, (repeated.get(key) || 0) + 1);
   }));
-  const structuralPattern = /^(chapter|part|section|unit|lesson|module|appendix|introduction|abstract|overview|conclusion|discussion|results|methodology|methods|references|bibliography)\b/i;
+  const structuralPattern = /^(chapter(?:\s+[\w.-]+)?|part(?:\s+[\w.-]+)?|unit(?:\s+[\w.-]+)?|lesson(?:\s+[\w.-]+)?|module(?:\s+[\w.-]+)?|appendix(?:\s+[\w.-]+)?|introduction|abstract|overview|conclusions?|discussion|results|methodology|methods|references|bibliography)\s*[:.-]?$/i;
   const numberedPattern = /^(\d+(?:\.\d+){0,3}|[IVXLC]+)[.)]?\s+[A-Z]/;
   const candidates = [];
   pages.forEach(page => page.lines.forEach((line, lineIndex) => {
-    const text = line.text.replace(/^[-•]\s*/, '').trim();
+    let text = line.text.replace(/^[-•]\s*/, '').trim();
+    text = text.replace(/\s+(?:Now|This section|In this section|We (?:now|describe|present)|The remainder)\b,?.*$/i, '').trim();
     if (text.length < 3 || text.length > 105 || /^\d+$/.test(text)) return;
     const wordCount = text.split(/\s+/).length;
     const repeatCount = repeated.get(text.toLowerCase().replace(/\d+/g, '#')) || 0;
@@ -2285,8 +2387,10 @@ async function analyzeDocumentLocally() {
     if ((isStructural || wordCount >= 2) && (isStructural || numberedPattern.test(text) || isLarge || (lineIndex < 4 && looksTitle && line.size >= baseSize * 1.18)) && repeatCount <= 2) {
       const score = (isStructural ? 5 : 0) + (isLarge ? Math.min(4, line.size / baseSize) : 0) + (lineIndex < 4 ? 1 : 0);
       let level = 2;
-      if (/^(part|chapter|unit|introduction|conclusion|appendix)\b/i.test(text)) level = 1;
+      if (/^(part|chapter|unit|introduction|conclusions?|appendix|abstract|references|bibliography)\b/i.test(text)) level = 1;
+      else if (/^\d+[.)]?\s+/.test(text)) level = currentDocumentKind === 'book' ? 2 : 1;
       else if (/^\d+\.\d+\.\d+/.test(text)) level = 3;
+      else if (/^\d+\.\d+/.test(text)) level = 2;
       candidates.push({ title: text, page: page.page, level, score, order: lineIndex });
     }
   }));
@@ -2300,13 +2404,13 @@ async function analyzeDocumentLocally() {
       seen.add(key);
       return true;
     })
-    .slice(0, 26);
+    .slice(0, 120);
 
   if (currentDocumentOutline.length < 2) {
     currentDocumentOutline = pages.map(page => {
       const line = page.lines.find(item => item.text.length >= 5 && item.text.length <= 80);
       return line ? { title: line.text, page: page.page, level: 2 } : null;
-    }).filter(Boolean).slice(0, 24);
+    }).filter(Boolean).slice(0, 60);
   }
   renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
   saveActiveDocumentSession();
@@ -2317,20 +2421,13 @@ function renderDocumentOutline(items, kind) {
   const kindElement = document.getElementById('document-kind');
   if (!list || !kindElement) return;
   kindElement.classList.remove('analyzing');
-  const labels = { book: ['▤', 'Book'], article: ['◫', 'Article'], blog: ['◎', 'Blog'], 'research paper': ['⌁', 'Research paper'], document: ['◇', 'Document'] };
+  const labels = { book: ['▤', 'Book'], article: ['◫', 'Article'], blog: ['◎', 'Blog'], resume: ['◉', 'Résumé'], code: ['⌘', 'Source code'], 'research paper': ['⌁', 'Research paper'], document: ['◇', 'Document'] };
   const [icon, label] = labels[kind] || labels.document;
   kindElement.innerHTML = `<span class="kind-icon">${icon}</span><span><strong>${label}</strong><small>Mapped locally · ${pdfPagesCount} pages</small></span>`;
-  list.innerHTML = '';
-  items.forEach((item, index) => {
-    const button = document.createElement('button');
-    button.className = `outline-item level-${item.level || 2}`;
-    button.innerHTML = `<span class="outline-index">${String(index + 1).padStart(2, '0')}</span><span class="outline-label">${escapeHtml(item.title)}</span><span class="outline-page">${item.page}</span>`;
-    button.addEventListener('click', () => {
+  renderOutlineHierarchy(items, (item, button) => {
       jumpToPage(item.page);
       list.querySelectorAll('.outline-item').forEach(node => node.classList.remove('active'));
       button.classList.add('active');
-    });
-    list.appendChild(button);
   });
 }
 
@@ -2343,12 +2440,12 @@ async function enhanceOutlineWithAI() {
   button.disabled = true;
   button.innerHTML = '<span>✦</span> Refining map…';
   try {
-    const prompt = `Classify this document and improve its navigation outline. Return ONLY JSON in this shape: {"kind":"book|article|blog|research paper|document","outline":[{"title":"...","page":1,"level":1}]}. Preserve accurate page numbers from the local candidates.\n\nLocal candidates: ${JSON.stringify(currentDocumentOutline)}\n\nDocument excerpt:\n${currentDocumentAnalysisText.slice(0, 12000)}`;
+    const prompt = `Classify this document and improve its navigation outline. Return ONLY JSON in this shape: {"kind":"book|article|blog|resume|code|research paper|document","outline":[{"title":"...","page":1,"level":1}]}. Level 1 is a folder/chapter and levels 2-3 are its subsections. Preserve accurate page numbers from the local candidates.\n\nLocal candidates: ${JSON.stringify(currentDocumentOutline)}\n\nDocument excerpt:\n${currentDocumentAnalysisText.slice(0, 12000)}`;
     const response = await fetchConfiguredAI(prompt);
     const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
     if (Array.isArray(parsed.outline) && parsed.outline.length) {
       currentDocumentKind = parsed.kind || currentDocumentKind;
-      currentDocumentOutline = parsed.outline.filter(item => item.title && Number.isFinite(Number(item.page))).map(item => ({ ...item, page: Number(item.page) })).slice(0, 40);
+      currentDocumentOutline = parsed.outline.filter(item => item.title && Number.isFinite(Number(item.page))).map(item => ({ ...item, page: Number(item.page), level: Math.max(1, Math.min(3, Number(item.level) || 2)) })).slice(0, 120);
       renderDocumentOutline(currentDocumentOutline, currentDocumentKind);
       saveActiveDocumentSession();
     }
@@ -3207,8 +3304,6 @@ function applyHighlight(color) {
 // Persistent File Sync (Web File System Access API)
 // ==========================================================================
 function initNotesEditor() {
-  const connectBtn = document.getElementById('btn-connect-file');
-  const disconnectBtn = document.getElementById('btn-disconnect-file');
   const notesTextarea = document.getElementById('notes-textarea');
   const exportBtn = document.getElementById('btn-export-txt');
   const clearBtn = document.getElementById('editor-btn-clear');
@@ -3249,19 +3344,9 @@ function initNotesEditor() {
     });
   }
   
-  // Load saved notes backup on load
-  const backup = localStorage.getItem('study_notes');
-  if (backup) {
-    notesTextarea.value = backup;
-  }
-  
-  connectBtn.addEventListener('click', connectNotesFile);
-  disconnectBtn.addEventListener('click', disconnectNotesFile);
-  
   // Note Text Change Autosave
   notesTextarea.addEventListener('input', () => {
-    localStorage.setItem('study_notes', notesTextarea.value);
-    showSaveStatus("Saved locally");
+    persistActiveNotes();
     saveSessionToCloud();
   });
   
@@ -3291,8 +3376,7 @@ function initNotesEditor() {
     notesTextarea.selectionEnd = startPos + wrapper.length + selected.length;
     
     // Trigger save
-    localStorage.setItem('study_notes', notesTextarea.value);
-    saveActiveDocumentSession();
+    persistActiveNotes();
     saveSessionToCloud();
   }
 
@@ -3303,16 +3387,14 @@ function initNotesEditor() {
     const replacement = `\n$$\n${selected}\n$$\n`;
     notesTextarea.setRangeText(replacement, startPos, endPos, 'end');
     notesTextarea.focus();
-    localStorage.setItem('study_notes', notesTextarea.value);
-    saveActiveDocumentSession();
+    persistActiveNotes();
     saveSessionToCloud();
   }
   
   clearBtn.addEventListener('click', () => {
     if (confirm("Are you sure you want to clear your study workspace notes? This will clear local memory, though connected file content on disk remains unchanged.")) {
       notesTextarea.value = '';
-      localStorage.removeItem('study_notes');
-      saveActiveDocumentSession();
+      persistActiveNotes();
       saveSessionToCloud();
     }
   });
@@ -3395,12 +3477,6 @@ function initNotesEditor() {
     cheatSheetBtn.addEventListener('click', () => exportNotesPdf('cheatsheet', cheatSheetBtn));
   }
   
-  // File system API check
-  if (typeof window.showOpenFilePicker !== 'function') {
-    connectBtn.style.display = 'none';
-    document.getElementById('file-status-text').textContent = "Real Sync Unsupported";
-    document.getElementById('file-path-text').textContent = "Use standard export button below.";
-  }
 }
 
 function initNotesDictation() {
@@ -3495,64 +3571,6 @@ function initNotesDictation() {
   });
 }
 
-async function connectNotesFile() {
-  try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{
-        description: 'Text Files',
-        accept: { 'text/plain': ['.txt', '.md'] }
-      }],
-      multiple: false
-    });
-    notesFileHandle = handle;
-    
-    const file = await notesFileHandle.getFile();
-    updateFileConnectionStatus(true, file.name);
-    addSystemChatMessage(`Connected successfully. Notes will write directly to: <strong>${file.name}</strong>`, "success");
-    
-    // Populate notes from disk if editor is empty
-    const fileText = await file.text();
-    const editor = document.getElementById('notes-textarea');
-    if (!editor.value.trim() && fileText.trim()) {
-      editor.value = fileText;
-      localStorage.setItem('study_notes', fileText);
-    }
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      console.error(err);
-      addSystemChatMessage(`Local note file connection failed: ${err.message}`, "error");
-    }
-  }
-}
-
-function disconnectNotesFile() {
-  notesFileHandle = null;
-  updateFileConnectionStatus(false);
-  addSystemChatMessage("Disconnected note file sync.", "primary");
-}
-
-function updateFileConnectionStatus(isConnected, name = '') {
-  const dot = document.getElementById('file-status-dot');
-  const label = document.getElementById('file-status-text');
-  const pathText = document.getElementById('file-path-text');
-  const connectBtn = document.getElementById('btn-connect-file');
-  const disconnectBtn = document.getElementById('btn-disconnect-file');
-  
-  if (isConnected) {
-    dot.className = "status-dot connected";
-    label.textContent = "SYNC ACTIVE";
-    pathText.textContent = name;
-    connectBtn.style.display = 'none';
-    disconnectBtn.style.display = 'block';
-  } else {
-    dot.className = "status-dot disconnected";
-    label.textContent = "DISCONNECTED";
-    pathText.textContent = "No local file selected";
-    connectBtn.style.display = 'block';
-    disconnectBtn.style.display = 'none';
-  }
-}
-
 async function appendToLocalFile(text, pageNum = '') {
   const editor = document.getElementById('notes-textarea');
   
@@ -3563,41 +3581,10 @@ async function appendToLocalFile(text, pageNum = '') {
   // 1. Update text area locally
   editor.value += fullNote;
   editor.scrollTop = editor.scrollHeight;
-  localStorage.setItem('study_notes', editor.value);
+  persistActiveNotes();
   saveSessionToCloud();
   
-  // 2. Try writing to connected file
-  if (notesFileHandle) {
-    try {
-      // Request write handle
-      const options = { mode: 'readwrite' };
-      if (await notesFileHandle.queryPermission(options) !== 'granted') {
-        if (await notesFileHandle.requestPermission(options) !== 'granted') {
-          throw new Error('Write permissions denied');
-        }
-      }
-      
-      const file = await notesFileHandle.getFile();
-      const existingText = await file.text();
-      
-      const writable = await notesFileHandle.createWritable({ keepExistingData: true });
-      await writable.write(existingText + fullNote);
-      await writable.close();
-      
-      showSaveStatus("Saved & Synced to File");
-    } catch (err) {
-      console.error(err);
-      addSystemChatMessage(`Error writing notes to disk: ${err.message}. Saving locally in browser context.`, "error");
-      showSaveStatus("Saved browser only");
-    }
-  } else {
-    showSaveStatus("Saved locally");
-    
-    // Alert user that file is not connected
-    if (typeof window.showOpenFilePicker === 'function') {
-      addSystemChatMessage("Note appended to workspace, but no local file is connected. Click 'Connect File' in the Notes tab to sync.", "warning");
-    }
-  }
+  showSaveStatus("Saved to this workspace");
 }
 
 function showSaveStatus(message) {
@@ -3893,7 +3880,7 @@ async function processGeneralAIPrompt(prompt) {
   try {
     let resultText = '';
     if (ragBuildPromise) await ragBuildPromise;
-    const passages = await retrieveDocumentContext(`${prompt} ${selectedText || ''}`);
+    const passages = await retrieveDocumentContext(`${prompt} ${selectedText || ''}`, 9);
     if (!passages.length) throw new Error('The local document index is not ready yet. Try again in a moment.');
     const enrichedPrompt = buildRagPrompt(prompt, passages);
       
@@ -4609,7 +4596,7 @@ async function loadSessionFromCloud() {
         const notesTextarea = document.getElementById('notes-textarea');
         if (notesTextarea) {
           notesTextarea.value = data.notes;
-          localStorage.setItem('study_notes', data.notes);
+          saveActiveDocumentSession();
         }
       }
       
@@ -4806,7 +4793,6 @@ function resetSessionState() {
   pdfScale = 1.2;
 
   localStorage.removeItem('study_highlights');
-  localStorage.removeItem('study_notes');
   localStorage.removeItem('study_flashcards');
   localStorage.removeItem('study_page_num');
   localStorage.removeItem('study_pdf_scale');

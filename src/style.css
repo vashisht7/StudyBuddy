@@ -3237,3 +3237,71 @@ html.native-app .tab-btn.active { background: linear-gradient(135deg, rgba(183,4
   .dictation-button #dictation-label { display: none; }
   .dictation-button { width: 30px; justify-content: center; padding: 0; }
 }
+
+/* Workspace polish: compact local notes, contained dictation and folder outline */
+.notes-workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 1px 2px;
+}
+.notes-workspace-header .notes-document-label { margin: 0; min-width: 0; }
+.notes-local-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(234,238,237,.42);
+  font-size: 8px;
+  letter-spacing: .2px;
+  white-space: nowrap;
+}
+.notes-local-badge i { width: 5px; height: 5px; border-radius: 50%; background: #75c795; box-shadow: 0 0 9px rgba(117,199,149,.42); }
+.notes-container { gap: 10px; min-width: 0; overflow: hidden; }
+.note-editor-wrapper { min-width: 0; min-height: 220px; }
+.editor-toolbar {
+  flex-wrap: wrap;
+  min-width: 0;
+  min-height: 42px;
+  height: auto;
+  padding-block: 5px;
+  overflow: hidden;
+}
+.editor-toolbar .divider-v { display: none; }
+.editor-toolbar .btn-icon { flex-basis: 24px; width: 24px; }
+.editor-toolbar .dictation-button { flex: 0 0 auto; margin-left: auto; }
+.editor-toolbar #editor-btn-clear { margin-left: 0 !important; }
+@media (max-width: 1260px) {
+  .editor-toolbar .divider-v { display: none; }
+  .editor-toolbar .btn-icon { flex-basis: 24px; width: 24px; }
+}
+
+.outline-list {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.15) transparent;
+}
+.outline-list::-webkit-scrollbar { width: 7px; }
+.outline-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 10px; background: rgba(255,255,255,.16); background-clip: padding-box; }
+.outline-folder { position: relative; margin-bottom: 2px; }
+.outline-folder-row { grid-template-columns: 18px minmax(0,1fr) 24px; }
+.outline-chevron { padding-top: 1px; color: rgba(244,249,248,.32); font-size: 12px; text-align: center; transition: transform .18s cubic-bezier(.2,.8,.2,1); }
+.outline-folder:not(.expanded) .outline-chevron { transform: rotate(-90deg); }
+.outline-children { display: grid; margin: 0 0 4px 9px; padding-left: 6px; border-left: 1px solid rgba(255,255,255,.065); animation: outline-children-in .18s ease-out; }
+.outline-folder:not(.expanded) .outline-children { display: none; }
+.outline-children .outline-item { grid-template-columns: 18px minmax(0,1fr) 22px; padding-block: 6px; }
+.outline-children .level-3 { padding-left: 14px; }
+@keyframes outline-children-in { from { opacity: 0; transform: translateY(-3px); } }
+
+/* A calmer document canvas with native-feeling scrolling and focus. */
+.pdf-scroll-container,
+.text-document-container { overscroll-behavior: contain; scroll-behavior: smooth; }
+.pdf-page-container { transition: box-shadow .2s ease, transform .2s ease; }
+.text-document-editor {
+  caret-color: #e2565d;
+  tab-size: 2;
+  text-rendering: optimizeLegibility;
+}
+.text-document-editor:focus { box-shadow: inset 0 0 0 1px rgba(255,255,255,.055); }

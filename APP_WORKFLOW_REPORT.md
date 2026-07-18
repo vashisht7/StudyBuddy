@@ -93,10 +93,10 @@ Cloud synchronization is disabled for the current release. Apple or Google sign-
 
 | Edition | File | Purpose |
 |---|---|---|
-| Website | `StudyBuddy-1.0.1-Website.zip` | Hosting and rapid UI development |
-| Standard Mac | `StudyBuddy-1.0.1-arm64.dmg` | Small Mac app; connect an existing model or optional cloud provider |
-| Portable Mac | `StudyBuddy-1.0.1-arm64-mac.zip` | App archive without DMG installation |
-| Complete Offline | `StudyBuddy-1.0.1-Compact-Offline-arm64.dmg` | App, Ollama, and multimodal Gemma 3 4B |
+| Website | `StudyBuddy-1.1.0-Website.zip` | Hosting and rapid UI development |
+| Standard Mac | `StudyBuddy-1.1.0-arm64.dmg` | Small Mac app; connect an existing model or optional cloud provider |
+| Portable Mac | `StudyBuddy-1.1.0-arm64-mac.zip` | App archive without DMG installation |
+| Complete Offline | `StudyBuddy-1.1.0-Compact-Offline-arm64.dmg` | App, Ollama, and multimodal Gemma 3 4B |
 
 ## Main technologies
 
