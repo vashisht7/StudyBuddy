@@ -2,6 +2,16 @@
 
 StudyBuddy is a local-first document reading workspace for macOS and the web. It combines PDF reading, editable documents, per-document notes, grounded Buddy chat, local RAG, polished exports, and Apple on-device speech-to-text.
 
+## What’s new in 1.1.0 Beta 1
+
+- Notes and Buddy conversations are isolated to their own document workspace.
+- The document map is now scrollable, with expandable chapter folders and nested subsections.
+- Local classification recognizes books, articles, blogs, research papers, résumés, and source code.
+- RAG retrieval is document-locked and section-aware, includes surrounding passages, and cites supporting pages.
+- Notes controls fit narrower Mac windows, including the Apple Speech Dictate button.
+- Editable documents and PDF annotation workflows have smoother navigation and visual polish.
+- The obsolete Notes **Connect File** control has been removed; workspace notes remain local automatically.
+
 ## Download
 
 Download the latest workspace and RAG beta from [GitHub Releases](https://github.com/vashisht7/StudyBuddy/releases/tag/v1.1.0-beta.1).
