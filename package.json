@@ -1,6 +1,6 @@
 {
   "name": "studybuddy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A local-first PDF reading, notes, and multimodal AI study workspace for macOS.",
   "author": "Vashisht Devasani",
   "private": true,
@@ -15,7 +15,7 @@
     "preview:web": "vite preview",
     "setup:local-ai": "bash scripts/setup-local-ai.sh",
     "build:speech": "bash scripts/build-speech-helper.sh",
-    "build:mac": "npm run build && npm run build:speech && electron-builder --mac",
+    "build:mac": "bash scripts/build-mac-distributable.sh",
     "build:mac:dir": "npm run build && npm run build:speech && electron-builder --mac dir",
     "build:offline-lite": "bash scripts/build-offline-dmg.sh gemma3:4b",
     "release:both": "bash scripts/release-both.sh"
