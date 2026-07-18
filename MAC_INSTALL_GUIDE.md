@@ -4,19 +4,19 @@
 
 | Edition | Download | Approximate size | Best for |
 |---|---|---:|---|
-| Standard Mac | `release/StudyBuddy-1.0.0-arm64.dmg` | 150 MB | Existing Ollama, cloud AI, or document tools without a bundled model |
-| Complete Offline Mac | `release/StudyBuddy-1.0.0-Compact-Offline-arm64.dmg` | 3.50 GB | Ollama and multimodal Gemma 3 4B included |
-| Portable Mac | `release/StudyBuddy-1.0.0-arm64-mac.zip` | 143 MB | Running without a DMG installer |
-| Website | `release/StudyBuddy-1.0.0-Website.zip` | 1.7 MB | Hosting or browser development |
+| Standard Mac | `release/StudyBuddy-1.0.1-arm64.dmg` | About 150 MB | Existing Ollama, cloud AI, or document tools without a bundled model |
+| Complete Offline Mac | `release/StudyBuddy-1.0.1-Compact-Offline-arm64.dmg` | About 3.5 GB | Ollama and multimodal Gemma 3 4B included |
+| Portable Mac | `release/StudyBuddy-1.0.1-arm64-mac.zip` | About 143 MB | Running without a DMG installer |
+| Website | `release/StudyBuddy-1.0.1-Website.zip` | About 1.7 MB | Hosting or browser development |
 
 All editions share the same interface and workspace behavior. Apple Speech dictation adds less than 0.1 MB because the recognition engine is supplied by macOS.
 
 ## Install the standard Mac app
 
-1. Download `StudyBuddy-1.0.0-arm64.dmg`, then double-click it.
+1. Download `StudyBuddy-1.0.1-arm64.dmg`, then double-click it.
 2. In the dark installer window, drag **StudyBuddy** onto the **Applications** folder shortcut.
 3. Eject the StudyBuddy disk image from Finder.
-4. Open **Applications**. Because this development build is not notarized yet, Control-click **StudyBuddy**, choose **Open**, then confirm **Open** once more.
+4. Open **Applications**. This repaired beta has a complete internal signature but is not Apple-notarized yet. Control-click **StudyBuddy**, choose **Open**, then confirm **Open** once more.
 5. Optionally connect an Apple or Google profile. This identifies the local user only; it does not upload study data.
 6. Add a PDF, DOCX, TXT, Markdown, or source-code file. The library and every workspace are saved automatically on this Mac.
 
@@ -28,7 +28,7 @@ For generated AI answers, open **AI Settings** and either:
 
 ## Install the complete offline edition
 
-1. From the GitHub release, download both offline `.part-aa` and `.part-ab` files plus `Join-StudyBuddy-Offline.zip` into the same folder.
+1. From the GitHub release, download both offline `.part-aa` and `.part-ab` files plus `Join-StudyBuddy-Offline-1.0.1.zip` into the same folder.
 2. Expand the ZIP and open the join command beside the two parts. It reconstructs the DMG, verifies its SHA-256 checksum, and opens it only when the download is intact.
 3. In the opened DMG, read **READ ME — Install StudyBuddy.txt**.
 4. Double-click **Install StudyBuddy Offline.command**, type `y`, and leave the DMG mounted while its three progress steps finish.
@@ -87,4 +87,4 @@ Apple Speech dictation is Mac-only. It remains hidden in the ordinary website be
 
 ## Distribution note
 
-The current DMGs pass integrity verification but are not Developer ID signed or notarized. A public warning-free release still requires an Apple Developer certificate, hardened runtime signing, notarization, and stapling.
+The repaired beta DMGs pass disk-image and strict nested code-signature verification. The fallback signature is ad-hoc, not a Developer ID signature, so a public warning-free release still requires a renewed Apple Developer certificate, hardened runtime signing, notarization, and stapling.

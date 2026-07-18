@@ -4,17 +4,27 @@ set -euo pipefail
 MODEL="${1:-gemma3:4b}"
 VERSION="$(node -p "require('./package.json').version")"
 SAFE_MODEL="${MODEL//[:\/]/-}"
-STAGE="release/offline-lite-${SAFE_MODEL}"
 OUTPUT="release/StudyBuddy-${VERSION}-Compact-Offline-arm64.dmg"
-APP_SOURCE="release/mac-arm64/StudyBuddy.app"
+APP_ZIP="release/StudyBuddy-${VERSION}-arm64-mac.zip"
 OLLAMA_APP="/Applications/Ollama.app"
 MODEL_NAME="${MODEL%%:*}"
 MODEL_TAG="${MODEL#*:}"
 MANIFEST="$HOME/.ollama/models/manifests/registry.ollama.ai/library/$MODEL_NAME/$MODEL_TAG"
+BUILD_ROOT="$(mktemp -d /tmp/studybuddy-offline-build.XXXXXX)"
+STAGE="$BUILD_ROOT/offline-lite-${SAFE_MODEL}"
+EXTRACT_ROOT="$BUILD_ROOT/app"
+OUTPUT_TEMP="$BUILD_ROOT/StudyBuddy-${VERSION}-Compact-Offline-arm64.dmg"
 
-if [[ ! -d "$APP_SOURCE" ]]; then
-  echo "Mac application is missing; building it first."
-  npm run build:mac:dir
+cleanup() {
+  case "$BUILD_ROOT" in
+    /tmp/studybuddy-offline-build.*) /bin/rm -rf -- "$BUILD_ROOT" ;;
+  esac
+}
+trap cleanup EXIT
+
+if [[ ! -f "$APP_ZIP" ]]; then
+  echo "Verified Mac application ZIP is missing; building it first."
+  npm run build:mac
 fi
 
 if [[ ! -d "$OLLAMA_APP" ]]; then
@@ -27,8 +37,10 @@ if [[ ! -f "$MANIFEST" ]]; then
   exit 1
 fi
 
-rm -rf "$STAGE" "$OUTPUT"
-mkdir -p "$STAGE/Resources/models/manifests/registry.ollama.ai/library/$MODEL_NAME" "$STAGE/Resources/models/blobs"
+mkdir -p "$EXTRACT_ROOT" "$STAGE/Resources/models/manifests/registry.ollama.ai/library/$MODEL_NAME" "$STAGE/Resources/models/blobs"
+/usr/bin/ditto -x -k "$APP_ZIP" "$EXTRACT_ROOT"
+APP_SOURCE="$EXTRACT_ROOT/StudyBuddy.app"
+codesign --verify --deep --strict --verbose=4 "$APP_SOURCE"
 
 /usr/bin/ditto "$APP_SOURCE" "$STAGE/StudyBuddy.app"
 /usr/bin/ditto "$OLLAMA_APP" "$STAGE/Resources/Ollama.app"
@@ -53,8 +65,10 @@ for (const digest of digests) {
 NODE
 
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "StudyBuddy Compact Offline" -srcfolder "$STAGE" -ov -format UDZO "$OUTPUT"
-rm -rf "$STAGE"
+hdiutil create -volname "StudyBuddy Compact Offline" -srcfolder "$STAGE" -ov -format UDZO "$OUTPUT_TEMP"
+hdiutil verify "$OUTPUT_TEMP"
+mkdir -p release
+/usr/bin/ditto "$OUTPUT_TEMP" "$OUTPUT"
 
 echo
 du -h "$OUTPUT"
